@@ -1,0 +1,27 @@
+[project]
+name = "errordog"
+version = "0.1.0"
+description = "Hybrid debugging and test automation server for AI agents and developers"
+requires-python = ">=3.13"
+dependencies = [
+    "fastmcp>=2.0.0",
+    "pydantic>=2.0.0",
+]
+
+[project.scripts]
+errordog = "errordog.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/errordog"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
