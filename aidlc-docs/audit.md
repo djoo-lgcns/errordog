@@ -141,3 +141,53 @@
 **Context**: CONSTRUCTION - Build and Test, Steps 2-7
 
 ---
+
+## Build and Test - User Integration Testing
+**Timestamp**: 2026-03-24T13:30:00Z
+**User Input**: User manually tested Phase 1 via FastMCP Inspector (localhost:6274), verified list_errors and get_error_details tools work end-to-end. Then "Continue to Next Stage".
+**AI Response**: Phase 1 complete. Proceeding to Unit 2: Python Runtime Tracker - Functional Design.
+**Context**: CONSTRUCTION - Build and Test, Step 9 (Approval Gate)
+
+---
+
+## Unit 2 Functional Design - Questions & Generation
+**Timestamp**: 2026-03-24T13:35:00Z
+**User Input**: Q1=B (auto-activate on import), Q2=A (uncaught only), Q3=B (configurable frame limit, default 50), Q4=B (truncate repr, default 1000 chars), Q5=A (preserve original excepthook)
+**AI Response**: No ambiguities. Generated 3 functional design artifacts: domain-entities.md (reuses Unit 1 entities + 2 config constants), business-rules.md (6 rule groups: activation, scope, frames, serialization, storage, safety), business-logic-model.md (2 flows: exception capture, auto-activation + safe serialization helper).
+**Context**: CONSTRUCTION - Unit 2 Functional Design, Steps 5-6
+
+---
+
+## Unit 2 Functional Design - Approval
+**Timestamp**: 2026-03-24T13:36:00Z
+**User Input**: "Continue to Next Stage"
+**AI Response**: Functional design approved. Proceeding to Code Generation (Unit 2).
+**Context**: CONSTRUCTION - Unit 2 Functional Design, Step 8 (Approval Gate)
+
+---
+
+## Unit 2 Code Generation - Plan Approval & Generation Complete
+**Timestamp**: 2026-03-24T13:37:00Z
+**User Input**: "yes" (approved code generation plan)
+**AI Response**: All 4 steps executed. 3 files created (1 source, 1 test, 1 script) + 1 docs. 52/52 tests passing (34 Unit 1 + 18 Unit 2). Integration test: snapshot captured and visible via MCP tools.
+**Context**: CONSTRUCTION - Unit 2 Code Generation, Steps 7-14
+
+---
+
+## Unit 2 Code Generation - Approval
+**Timestamp**: 2026-03-24T13:38:00Z
+**User Input**: "Continue to Next Stage"
+**AI Response**: Code generation approved. Proceeding to Build and Test (Unit 2).
+**Context**: CONSTRUCTION - Unit 2 Code Generation, Step 15 (Approval Gate)
+
+---
+
+## Build and Test - Unit 2 Complete
+**Timestamp**: 2026-03-24T13:39:00Z
+**Build Status**: Success
+**Test Status**: PASS (52/52 total: 34 Unit 1 + 18 Unit 2)
+**Integration Status**: PASS (tracker captures snapshot, visible via MCP tools)
+**Files Generated**: unit-2-test-instructions.md, build-and-test-summary.md (updated)
+**Context**: CONSTRUCTION - Build and Test (Unit 2)
+
+---
