@@ -26,6 +26,23 @@ def main() -> None:
 
         run()
 
+    elif args[0] == "clean":
+        from errordog.store import SnapshotStore
+        from pathlib import Path
+
+        store = SnapshotStore()
+        snapshots = list(store.snapshot_dir.glob("*.json"))
+        if not snapshots:
+            print("No snapshots to remove.")
+            sys.exit(0)
+        print(f"Remove {len(snapshots)} snapshot(s) from {store.snapshot_dir}? [y/N] ", end="")
+        if input().strip().lower() == "y":
+            for p in snapshots:
+                p.unlink()
+            print(f"Removed {len(snapshots)} snapshot(s).")
+        else:
+            print("Aborted.")
+
     else:
         # Treat first arg as script path: python -m errordog script.py [args...]
         from errordog.runner import run

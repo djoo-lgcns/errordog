@@ -23,6 +23,7 @@ class ErrorSnapshot(BaseModel):
     exception_type: str
     exception_message: str
     frames: list[Frame] = Field(min_length=1)
+    cwd: str | None = None  # working directory at capture time
 
 
 class ErrorSummary(BaseModel):

@@ -1,13 +1,27 @@
 """Mock DAP adapter — responds to IDE requests from an ESF snapshot."""
 
+import ast
 import asyncio
 import logging
+from typing import Any
 
 from errordog.dap.protocol import write_message
 from errordog.dap.session import DebugSession, StackFrame, Variable
 from errordog.store import SnapshotStore
 
 logger = logging.getLogger(__name__)
+
+# Frame indices occupy 0..N-1; drill-down refs start here to avoid collisions.
+_DRILLDOWN_REF_BASE = 1000
+
+
+def _make_source(path: str | None) -> dict:
+    """Build a DAP source object, marking internal/frozen frames as deemphasized."""
+    if not path:
+        return {}
+    if path.startswith("<"):  # e.g. <frozen runpy>, <string>
+        return {"name": path, "presentationHint": "deemphasized"}
+    return {"path": path}
 
 
 class MockAdapter:
@@ -19,6 +33,8 @@ class MockAdapter:
         self._seq = 1
         self._loaded = False
         self._snapshot_meta: dict = {}
+        self._drilldown: dict[int, list[dict]] = {}  # ref → child variable dicts
+        self._next_ref = _DRILLDOWN_REF_BASE
 
     # ── message builders ──────────────────────────────────────────────────
 
@@ -45,6 +61,44 @@ class MockAdapter:
             "body": body if body is not None else {},
         }
 
+    # ── drill-down ref registry ────────────────────────────────────────────
+
+    def _register(self, value: Any) -> int:
+        """Register expandable value in drill-down map. Returns variablesReference (0 if not expandable)."""
+        if isinstance(value, dict):
+            ref = self._next_ref
+            self._next_ref += 1
+            self._drilldown[ref] = [
+                self._make_var(str(k), v) for k, v in value.items()
+            ]
+            return ref
+        if isinstance(value, (list, tuple)):
+            ref = self._next_ref
+            self._next_ref += 1
+            self._drilldown[ref] = [
+                self._make_var(f"[{i}]", v) for i, v in enumerate(value)
+            ]
+            return ref
+        return 0
+
+    def _make_var(self, name: str, value: Any) -> dict:
+        """Build a DAP variable dict for any Python value, with recursive drill-down."""
+        value_repr = repr(value)
+        var_ref = self._register(value)
+        return {
+            "name": name,
+            "value": value_repr,
+            "type": type(value).__name__,
+            "variablesReference": var_ref,
+        }
+
+    def _parse_repr(self, value_repr: str) -> Any:
+        """Try to parse a repr string back to a Python value via ast.literal_eval."""
+        try:
+            return ast.literal_eval(value_repr)
+        except (ValueError, SyntaxError):
+            return value_repr  # fall back to the raw string
+
     # ── snapshot loading ──────────────────────────────────────────────────
 
     def _load(self) -> bool:
@@ -62,11 +116,23 @@ class MockAdapter:
             for i, f in enumerate(snapshot.frames)
         ]
         self.session.frame_id = 0
-        # frame index == variablesReference (synthetic, used in scopes response)
-        self.session.variables = {
-            i: [Variable(name=k, value=v) for k, v in f.locals.items()]
-            for i, f in enumerate(snapshot.frames)
-        }
+
+        # Build variables with drill-down refs eagerly at load time.
+        # Frame index i == variablesReference used in scopes response.
+        self.session.variables = {}
+        for i, f in enumerate(snapshot.frames):
+            frame_vars: list[Variable] = []
+            for k, v_repr in f.locals.items():
+                parsed = self._parse_repr(v_repr)
+                var_ref = self._register(parsed)
+                frame_vars.append(Variable(
+                    name=k,
+                    value=v_repr,
+                    type=type(parsed).__name__ if not isinstance(parsed, str) else None,
+                    variables_reference=var_ref,
+                ))
+            self.session.variables[i] = frame_vars
+
         self._snapshot_meta = {
             "exception_type": snapshot.exception_type,
             "exception_message": snapshot.exception_message,
@@ -116,8 +182,8 @@ class MockAdapter:
                     "id": f.id,
                     "name": f.name,
                     "line": f.line,
-                    "column": 0,
-                    "source": {"path": f.source_path} if f.source_path else {},
+                    "column": 1,
+                    "source": _make_source(f.source_path),
                 }
                 for f in self.session.stack_trace
             ]
@@ -128,7 +194,6 @@ class MockAdapter:
 
         elif command == "scopes":
             frame_id = msg.get("arguments", {}).get("frameId", 0)
-            # Use frame_id as variablesReference so variables requests can look up by frame index
             await write_message(writer, self._response(msg, {
                 "scopes": [{
                     "name": "Locals",
@@ -139,18 +204,25 @@ class MockAdapter:
 
         elif command == "variables":
             var_ref = msg.get("arguments", {}).get("variablesReference", 0)
-            variables = self.session.variables.get(var_ref, [])
-            await write_message(writer, self._response(msg, {
-                "variables": [
-                    {
-                        "name": v.name,
-                        "value": v.value,
-                        "type": v.type or "",
-                        "variablesReference": v.variables_reference,
-                    }
-                    for v in variables
-                ],
-            }))
+            if var_ref in self._drilldown:
+                # Drill-down into a dict/list value
+                await write_message(writer, self._response(msg, {
+                    "variables": self._drilldown[var_ref],
+                }))
+            else:
+                # Frame locals (var_ref == frame index)
+                variables = self.session.variables.get(var_ref, [])
+                await write_message(writer, self._response(msg, {
+                    "variables": [
+                        {
+                            "name": v.name,
+                            "value": v.value,
+                            "type": v.type or "",
+                            "variablesReference": v.variables_reference,
+                        }
+                        for v in variables
+                    ],
+                }))
 
         elif command == "disconnect":
             await write_message(writer, self._response(msg))

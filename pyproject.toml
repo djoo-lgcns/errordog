@@ -18,6 +18,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/errordog"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"errordog-autotrack.pth" = "errordog-autotrack.pth"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

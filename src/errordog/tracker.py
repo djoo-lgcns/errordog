@@ -11,6 +11,7 @@ import logging
 import sys
 import types
 from datetime import datetime, timezone
+from pathlib import Path
 
 from errordog.models import ErrorSnapshot, Frame, generate_error_id
 from errordog.store import SnapshotStore
@@ -46,9 +47,14 @@ def _extract_frames(tb: types.TracebackType | None) -> list[Frame]:
     current = tb
     while current is not None:
         frame = current.tb_frame
+        raw_path = frame.f_code.co_filename
+        if raw_path.startswith("<"):
+            file_path = raw_path  # e.g. <frozen runpy>, <string>
+        else:
+            file_path = str(Path(raw_path).resolve())
         frames.append(
             Frame(
-                file_path=frame.f_code.co_filename,
+                file_path=file_path,
                 line_number=current.tb_lineno,
                 function_name=frame.f_code.co_name,
                 locals=_serialize_locals(frame.f_locals),
@@ -95,6 +101,7 @@ def _errordog_excepthook(
             exception_type=exc_type.__name__,
             exception_message=str(exc_value),
             frames=frames,
+            cwd=str(Path.cwd()),
         )
 
         store = SnapshotStore()

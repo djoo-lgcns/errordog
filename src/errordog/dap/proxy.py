@@ -33,14 +33,33 @@ class DapServer:
         logger.info("DAP: IDE connected from %s", addr)
 
         try:
-            # Buffer messages until we see 'attach' to decide mode
+            # Buffer messages until we see 'attach' to decide mode.
+            # Respond to 'initialize' immediately so the IDE doesn't time out
+            # while waiting for a response before sending 'attach'.
             buffered: list[dict] = []
+            proxy_seq = 9000  # high seq to avoid colliding with IDE/debugpy seqs
+
             while True:
                 msg = await read_message(reader)
                 buffered.append(msg)
+                command = msg.get("command")
 
-                if msg.get("command") == "attach":
-                    error_id = msg.get("arguments", {}).get("error_id")
+                if command == "initialize":
+                    # Acknowledge immediately — IDE won't send 'attach' until it gets this
+                    await write_message(writer, {
+                        "seq": proxy_seq,
+                        "type": "response",
+                        "request_seq": msg["seq"],
+                        "command": "initialize",
+                        "success": True,
+                        "body": {"supportsConfigurationDoneRequest": True},
+                    })
+                    proxy_seq += 1
+
+                elif command == "attach":
+                    args = msg.get("arguments", {})
+                    logger.info("DAP: attach arguments: %s", args)
+                    error_id = args.get("error_id") or None
                     if error_id:
                         logger.info("DAP: mock mode — error_id=%s", error_id)
                         await self._run_mock(buffered, reader, writer, error_id)
@@ -70,8 +89,10 @@ class DapServer:
     ) -> None:
         """Run a mock debug session from an ESF snapshot."""
         adapter = MockAdapter(error_id)
-        # Replay buffered messages (initialize, attach)
+        # Replay buffered messages — skip 'initialize' since proxy already responded
         for msg in buffered:
+            if msg.get("command") == "initialize":
+                continue
             done = await adapter.process(msg, writer)
             if done:
                 return
@@ -103,9 +124,14 @@ class DapServer:
         session = DebugSession(mode="proxy")
         pending: dict[int, str] = {}  # request_seq → command (for response correlation)
 
-        # Forward buffered messages to debugpy
+        # Forward buffered messages to debugpy.
+        # Track initialize seq so we can discard debugpy's duplicate response
+        # (proxy already responded to initialize during handshake).
+        init_seq: int | None = None
         for msg in buffered:
             pending[msg["seq"]] = msg.get("command", "")
+            if msg.get("command") == "initialize":
+                init_seq = msg["seq"]
             await write_message(dbg_writer, msg)
 
         async def ide_to_debugpy() -> None:
@@ -121,6 +147,14 @@ class DapServer:
             try:
                 while True:
                     msg = await read_message(dbg_reader)
+                    # Discard debugpy's initialize response — proxy already sent one
+                    if (
+                        msg.get("type") == "response"
+                        and msg.get("command") == "initialize"
+                        and msg.get("request_seq") == init_seq
+                    ):
+                        pending.pop(init_seq, None)
+                        continue
                     _intercept(msg, session, pending)
                     await write_message(ide_writer, msg)
             except (EOFError, ConnectionResetError):
