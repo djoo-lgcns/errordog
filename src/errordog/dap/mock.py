@@ -224,6 +224,38 @@ class MockAdapter:
                     ],
                 }))
 
+        elif command == "evaluate":
+            args = msg.get("arguments", {})
+            expression = args.get("expression", "")
+            frame_id = args.get("frameId", 0)
+            frame_vars = self.session.variables.get(frame_id)
+            if frame_vars is None:
+                await write_message(writer, self._response(msg, {
+                    "result": f"No frame with id {frame_id}",
+                    "type": "",
+                    "variablesReference": 0,
+                }))
+            else:
+                namespace: dict[str, Any] = {}
+                for v in frame_vars:
+                    parsed = self._parse_repr(v.value)
+                    if parsed != v.value or v.value == repr(parsed):
+                        namespace[v.name] = parsed
+                try:
+                    result = eval(expression, {"__builtins__": __builtins__}, namespace)
+                    var_ref = self._register(result)
+                    await write_message(writer, self._response(msg, {
+                        "result": repr(result),
+                        "type": type(result).__name__,
+                        "variablesReference": var_ref,
+                    }))
+                except Exception as e:
+                    await write_message(writer, self._response(msg, {
+                        "result": f"{type(e).__name__}: {e}",
+                        "type": "",
+                        "variablesReference": 0,
+                    }))
+
         elif command == "disconnect":
             await write_message(writer, self._response(msg))
             return True

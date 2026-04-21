@@ -55,7 +55,7 @@
 - [x] Build and Test (Unit 3)
 
 ### CONSTRUCTION PHASE - Unit 4 (Phase 4: AI Hypothesis Testing)
-- [ ] Functional Design (Unit 4)
+- [x] Functional Design (Unit 4)
 - [ ] Code Generation (Unit 4)
 - [ ] Build and Test (Unit 4)
 

@@ -16,7 +16,7 @@ Unit 4 adds three MCP tools that enable AI agents (and developers) to analyze er
 - [x] Step 4: Design business rules for Unit 4
 - [x] Step 5: Design business logic model for Unit 4
 - [x] Step 6: Write functional design artifacts
-- [ ] Step 7: Present for approval
+- [x] Step 7: Present for approval
 
 ---
 

@@ -204,6 +204,90 @@ class TestMockAdapterVariables:
         assert "items" in names
 
 
+class TestMockAdapterEvaluate:
+    def _attach(self, adapter: MockAdapter) -> None:
+        asyncio.run(
+            adapter.process(
+                _make_request(2, "attach", {"error_id": "err_test001"}),
+                FakeWriter(),  # type: ignore[arg-type]
+            )
+        )
+
+    def test_evaluate_simple_expression(self, sample_snapshot: ErrorSnapshot) -> None:
+        adapter = MockAdapter("err_test001")
+        self._attach(adapter)
+        writer = FakeWriter()
+        asyncio.run(
+            adapter.process(
+                _make_request(10, "evaluate", {"expression": "y + 1", "frameId": 0}),
+                writer,  # type: ignore[arg-type]
+            )
+        )
+        msg = writer.messages()[0]
+        assert msg["success"] is True
+        assert msg["body"]["result"] == "43"
+        assert msg["body"]["type"] == "int"
+
+    def test_evaluate_len_on_list(self, sample_snapshot: ErrorSnapshot) -> None:
+        adapter = MockAdapter("err_test001")
+        self._attach(adapter)
+        writer = FakeWriter()
+        asyncio.run(
+            adapter.process(
+                _make_request(10, "evaluate", {"expression": "len(items)", "frameId": 1}),
+                writer,  # type: ignore[arg-type]
+            )
+        )
+        msg = writer.messages()[0]
+        assert msg["success"] is True
+        assert msg["body"]["result"] == "2"
+
+    def test_evaluate_error_returns_success_with_error_string(
+        self, sample_snapshot: ErrorSnapshot
+    ) -> None:
+        adapter = MockAdapter("err_test001")
+        self._attach(adapter)
+        writer = FakeWriter()
+        asyncio.run(
+            adapter.process(
+                _make_request(10, "evaluate", {"expression": "1/0", "frameId": 0}),
+                writer,  # type: ignore[arg-type]
+            )
+        )
+        msg = writer.messages()[0]
+        assert msg["success"] is True
+        assert "ZeroDivisionError" in msg["body"]["result"]
+
+    def test_evaluate_nonexistent_frame(self, sample_snapshot: ErrorSnapshot) -> None:
+        adapter = MockAdapter("err_test001")
+        self._attach(adapter)
+        writer = FakeWriter()
+        asyncio.run(
+            adapter.process(
+                _make_request(10, "evaluate", {"expression": "x", "frameId": 99}),
+                writer,  # type: ignore[arg-type]
+            )
+        )
+        msg = writer.messages()[0]
+        assert msg["success"] is True
+        assert "No frame" in msg["body"]["result"]
+
+    def test_evaluate_result_drillable_for_list(
+        self, sample_snapshot: ErrorSnapshot
+    ) -> None:
+        adapter = MockAdapter("err_test001")
+        self._attach(adapter)
+        writer = FakeWriter()
+        asyncio.run(
+            adapter.process(
+                _make_request(10, "evaluate", {"expression": "items", "frameId": 1}),
+                writer,  # type: ignore[arg-type]
+            )
+        )
+        msg = writer.messages()[0]
+        assert msg["body"]["variablesReference"] > 0
+
+
 class TestMockAdapterDisconnect:
     def test_disconnect_returns_done(self, snapshot_dir: Path) -> None:
         adapter = MockAdapter("err_test001")

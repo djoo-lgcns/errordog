@@ -207,3 +207,27 @@
 **Context**: CONSTRUCTION - Functional Design (Unit 4), Steps 3-6
 
 ---
+
+## Unit 4 - Functional Design Revision: Post-Mortem Evaluate
+**Timestamp**: 2026-04-21T00:00:00Z
+**User Input**: "그럼 post-mortem 은 구현 안된 거 아니야?" / "원래의 plan에는 포함되어있던 것 같은데"
+**AI Response**: User correctly identified missing DAP evaluate handler in MockAdapter. Updated business-logic-model.md to add MockAdapter evaluate handler section. Added BR-9 to business-rules.md. Three integration points now covered: DAP evaluate (IDE), MCP evaluate_expression (AI), MCP generate_reproduction_test (AI).
+**Context**: CONSTRUCTION - Functional Design (Unit 4), design revision
+
+---
+
+## Unit 4 - Functional Design Approved
+**Timestamp**: 2026-04-21T00:01:00Z
+**User Input**: "진행해"
+**AI Response**: Functional Design approved. Proceeding to Code Generation (Unit 4).
+**Context**: CONSTRUCTION - Functional Design (Unit 4) complete, moving to Code Generation
+
+---
+
+## Unit 4 - Code Generation Plan Approved
+**Timestamp**: 2026-04-21T00:02:00Z
+**User Input**: "응 진행해"
+**AI Response**: Code generation plan approved. Beginning Step 1: evaluator.py
+**Context**: CONSTRUCTION - Code Generation (Unit 4), Part 2 starting
+
+---
