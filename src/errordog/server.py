@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
-from errordog.evaluator import eval_expression
+from errordog.evaluator import eval_expression, eval_expression_coredumpy
 from errordog.store import SnapshotStore
 from errordog.testgen import generate_reproduction_test as _generate_test
 
@@ -78,6 +78,16 @@ def evaluate_expression(
     except ValueError:
         return {"success": False, "error": f"Snapshot corrupted: {error_id}"}
 
+    # Coredumpy path: full-fidelity eval against real objects
+    if snapshot.dump_path and Path(snapshot.dump_path).exists():
+        try:
+            result = eval_expression_coredumpy(expression, snapshot.dump_path, frame_index)
+            result["mode"] = "coredumpy"
+            return result
+        except Exception:
+            pass  # fall through to ESF
+
+    # ESF fallback: repr-based reconstruction
     if frame_index < 0 or frame_index >= len(snapshot.frames):
         return {
             "success": False,

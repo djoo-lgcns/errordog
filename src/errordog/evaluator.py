@@ -1,7 +1,10 @@
 """Expression evaluation against ESF snapshot frame locals."""
 
 import ast
+from pathlib import Path
 from typing import Any
+
+import coredumpy
 
 
 def reconstruct_namespace(
@@ -24,7 +27,7 @@ def reconstruct_namespace(
 
 
 def eval_expression(expression: str, frame_locals: dict[str, str]) -> dict:
-    """Evaluate a Python expression against reconstructed frame locals.
+    """Evaluate a Python expression against reconstructed frame locals (ESF fallback).
 
     Returns a dict with: success, result, error, unavailable_vars.
     """
@@ -43,4 +46,47 @@ def eval_expression(expression: str, frame_locals: dict[str, str]) -> dict:
             "result": None,
             "error": f"{type(e).__name__}: {e}",
             "unavailable_vars": unavailable,
+        }
+
+
+def eval_expression_coredumpy(
+    expression: str, dump_path: str, frame_index: int = 0
+) -> dict:
+    """Evaluate a Python expression against a coredumpy dump (full fidelity).
+
+    Returns a dict with: success, result, error, mode.
+    """
+    data = coredumpy.Coredumpy.load_data_from_path(dump_path)
+    frame = data["frame"]
+
+    # Walk to the requested frame index
+    frames: list[Any] = []
+    current = frame
+    while current is not None:
+        frames.append(current)
+        current = getattr(current, "f_back", None)
+
+    if frame_index < 0 or frame_index >= len(frames):
+        return {
+            "success": False,
+            "result": None,
+            "error": f"Frame index {frame_index} out of range (0..{len(frames) - 1})",
+            "unavailable_vars": [],
+        }
+
+    target = frames[frame_index]
+    try:
+        result = eval(expression, target.f_globals, target.f_locals)
+        return {
+            "success": True,
+            "result": repr(result),
+            "error": None,
+            "unavailable_vars": [],
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "result": None,
+            "error": f"{type(e).__name__}: {e}",
+            "unavailable_vars": [],
         }

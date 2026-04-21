@@ -167,6 +167,15 @@ wheels = [
 ]
 
 [[package]]
+name = "coredumpy"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ce/90/4ae87d5e23231d70ae516631101fb24c1a25f257d660813a80dacbdf9593/coredumpy-0.5.0.tar.gz", hash = "sha256:44ebe70b8e318306a1b6fc335c05aeda8be61b0f238f5d71df2de6a88345c156", size = 36238, upload-time = "2026-01-05T01:44:33.689Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/11/64/1f4b441175f729cd6171ae7ffdbf60ec9048e9609efa5822218fd2e13999/coredumpy-0.5.0-py3-none-any.whl", hash = "sha256:a7267a2fb8b3d76624ff8c6027fc24237e5fd13429cf7ab95051072f49ecf428", size = 31300, upload-time = "2026-01-05T01:44:32.556Z" },
+]
+
+[[package]]
 name = "cryptography"
 version = "46.0.5"
 source = { registry = "https://pypi.org/simple" }
@@ -279,6 +288,7 @@ name = "errordog"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "coredumpy" },
     { name = "fastmcp" },
     { name = "pydantic" },
 ]
@@ -290,6 +300,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "coredumpy", specifier = ">=0.5.0" },
     { name = "fastmcp", specifier = ">=2.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
 ]

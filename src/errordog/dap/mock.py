@@ -3,7 +3,10 @@
 import ast
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any
+
+import coredumpy
 
 from errordog.dap.protocol import write_message
 from errordog.dap.session import DebugSession, StackFrame, Variable
@@ -35,6 +38,7 @@ class MockAdapter:
         self._snapshot_meta: dict = {}
         self._drilldown: dict[int, list[dict]] = {}  # ref → child variable dicts
         self._next_ref = _DRILLDOWN_REF_BASE
+        self._coredumpy_frames: list[Any] | None = None  # loaded coredumpy frames
 
     # ── message builders ──────────────────────────────────────────────────
 
@@ -110,12 +114,77 @@ class MockAdapter:
             logger.error("MockAdapter: cannot load snapshot %s: %s", self.error_id, exc)
             return False
 
+        self._snapshot_meta = {
+            "exception_type": snapshot.exception_type,
+            "exception_message": snapshot.exception_message,
+        }
         self.session.thread_id = 1
+        self.session.frame_id = 0
+
+        # Try coredumpy dump first (full object fidelity)
+        if snapshot.dump_path and Path(snapshot.dump_path).exists():
+            try:
+                self._load_coredumpy(snapshot.dump_path, snapshot)
+                self._loaded = True
+                return True
+            except Exception:
+                logger.debug("MockAdapter: coredumpy load failed, falling back to ESF", exc_info=True)
+
+        # Fallback: ESF repr-based
+        self._load_esf(snapshot)
+        self._loaded = True
+        return True
+
+    def _load_coredumpy(self, dump_path: str, snapshot: Any) -> None:
+        """Load coredumpy dump for full-fidelity post-mortem."""
+        data = coredumpy.Coredumpy.load_data_from_path(dump_path)
+        frame = data["frame"]
+
+        # Walk frame chain to build stack trace and variables
+        cd_frames: list[Any] = []
+        current = frame
+        while current is not None:
+            cd_frames.append(current)
+            current = getattr(current, "f_back", None)
+
+        self._coredumpy_frames = cd_frames
+        self.session.stack_trace = [
+            StackFrame(
+                id=i,
+                name=f.f_code.co_name,
+                line=f.f_lineno,
+                source_path=f.f_code.co_filename,
+            )
+            for i, f in enumerate(cd_frames)
+        ]
+
+        # Build variables from real frame locals
+        self.session.variables = {}
+        for i, f in enumerate(cd_frames):
+            frame_vars: list[Variable] = []
+            try:
+                f_locals = f.f_locals
+            except Exception:
+                f_locals = {}
+            for k, v in f_locals.items():
+                v_repr = repr(v)
+                var_ref = self._register(v)
+                frame_vars.append(Variable(
+                    name=str(k),
+                    value=v_repr,
+                    type=type(v).__name__,
+                    variables_reference=var_ref,
+                ))
+            self.session.variables[i] = frame_vars
+
+        logger.info("MockAdapter: loaded coredumpy dump with %d frames", len(cd_frames))
+
+    def _load_esf(self, snapshot: Any) -> None:
+        """Fallback: load from ESF repr strings."""
         self.session.stack_trace = [
             StackFrame(id=i, name=f.function_name, line=f.line_number, source_path=f.file_path)
             for i, f in enumerate(snapshot.frames)
         ]
-        self.session.frame_id = 0
 
         # Build variables with drill-down refs eagerly at load time.
         # Frame index i == variablesReference used in scopes response.
@@ -132,13 +201,6 @@ class MockAdapter:
                     variables_reference=var_ref,
                 ))
             self.session.variables[i] = frame_vars
-
-        self._snapshot_meta = {
-            "exception_type": snapshot.exception_type,
-            "exception_message": snapshot.exception_message,
-        }
-        self._loaded = True
-        return True
 
     # ── request handler ───────────────────────────────────────────────────
 
@@ -228,21 +290,12 @@ class MockAdapter:
             args = msg.get("arguments", {})
             expression = args.get("expression", "")
             frame_id = args.get("frameId", 0)
-            frame_vars = self.session.variables.get(frame_id)
-            if frame_vars is None:
-                await write_message(writer, self._response(msg, {
-                    "result": f"No frame with id {frame_id}",
-                    "type": "",
-                    "variablesReference": 0,
-                }))
-            else:
-                namespace: dict[str, Any] = {}
-                for v in frame_vars:
-                    parsed = self._parse_repr(v.value)
-                    if parsed != v.value or v.value == repr(parsed):
-                        namespace[v.name] = parsed
+
+            # Coredumpy path: eval against real frame objects
+            if self._coredumpy_frames and 0 <= frame_id < len(self._coredumpy_frames):
+                cd_frame = self._coredumpy_frames[frame_id]
                 try:
-                    result = eval(expression, {"__builtins__": __builtins__}, namespace)
+                    result = eval(expression, cd_frame.f_globals, cd_frame.f_locals)
                     var_ref = self._register(result)
                     await write_message(writer, self._response(msg, {
                         "result": repr(result),
@@ -255,6 +308,35 @@ class MockAdapter:
                         "type": "",
                         "variablesReference": 0,
                     }))
+            else:
+                # ESF fallback: reconstruct namespace from repr strings
+                frame_vars = self.session.variables.get(frame_id)
+                if frame_vars is None:
+                    await write_message(writer, self._response(msg, {
+                        "result": f"No frame with id {frame_id}",
+                        "type": "",
+                        "variablesReference": 0,
+                    }))
+                else:
+                    namespace: dict[str, Any] = {}
+                    for v in frame_vars:
+                        parsed = self._parse_repr(v.value)
+                        if parsed != v.value or v.value == repr(parsed):
+                            namespace[v.name] = parsed
+                    try:
+                        result = eval(expression, {"__builtins__": __builtins__}, namespace)
+                        var_ref = self._register(result)
+                        await write_message(writer, self._response(msg, {
+                            "result": repr(result),
+                            "type": type(result).__name__,
+                            "variablesReference": var_ref,
+                        }))
+                    except Exception as e:
+                        await write_message(writer, self._response(msg, {
+                            "result": f"{type(e).__name__}: {e}",
+                            "type": "",
+                            "variablesReference": 0,
+                        }))
 
         elif command == "disconnect":
             await write_message(writer, self._response(msg))

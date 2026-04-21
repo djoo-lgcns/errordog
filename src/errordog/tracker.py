@@ -13,6 +13,8 @@ import types
 from datetime import datetime, timezone
 from pathlib import Path
 
+import coredumpy
+
 from errordog.models import ErrorSnapshot, Frame, generate_error_id
 from errordog.store import SnapshotStore
 
@@ -20,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FRAMES: int = 50
 MAX_REPR_LENGTH: int = 1000
+DUMP_DIR: Path = Path.home() / ".errordog" / "dumps"
 
 _installed: bool = False
 _original_excepthook = sys.excepthook
@@ -84,6 +87,24 @@ def _errordog_excepthook(
         return
 
     try:
+        error_id = generate_error_id()
+
+        # Save coredumpy dump (full object state)
+        dump_path: str | None = None
+        try:
+            tb = exc_tb
+            while tb is not None and tb.tb_next is not None:
+                tb = tb.tb_next
+            if tb is not None:
+                DUMP_DIR.mkdir(parents=True, exist_ok=True)
+                dump_path = coredumpy.dump(
+                    tb.tb_frame,
+                    path=str(DUMP_DIR / f"{error_id}.dump"),
+                    description=f"{exc_type.__name__}: {exc_value}",
+                )
+        except Exception:
+            logger.debug("Errordog: coredumpy dump failed", exc_info=True)
+
         frames = _extract_frames(exc_tb)
         if not frames:
             frames = [
@@ -96,12 +117,13 @@ def _errordog_excepthook(
             ]
 
         snapshot = ErrorSnapshot(
-            error_id=generate_error_id(),
+            error_id=error_id,
             timestamp=datetime.now(timezone.utc).isoformat(),
             exception_type=exc_type.__name__,
             exception_message=str(exc_value),
             frames=frames,
             cwd=str(Path.cwd()),
+            dump_path=dump_path,
         )
 
         store = SnapshotStore()

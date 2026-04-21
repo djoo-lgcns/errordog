@@ -24,6 +24,7 @@ class ErrorSnapshot(BaseModel):
     exception_message: str
     frames: list[Frame] = Field(min_length=1)
     cwd: str | None = None  # working directory at capture time
+    dump_path: str | None = None  # coredumpy dump file path (full state)
 
 
 class ErrorSummary(BaseModel):

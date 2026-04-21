@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Hybrid debugging and test automation server for AI agents and developers"
 requires-python = ">=3.13"
 dependencies = [
+    "coredumpy>=0.5.0",
     "fastmcp>=2.0.0",
     "pydantic>=2.0.0",
 ]
