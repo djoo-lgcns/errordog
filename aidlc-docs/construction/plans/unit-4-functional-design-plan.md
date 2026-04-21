@@ -10,12 +10,12 @@ Unit 4 adds three MCP tools that enable AI agents (and developers) to analyze er
 
 ## Execution Steps
 
-- [ ] Step 1: Analyze context — review existing models, store, server, DAP mock, tracker
-- [ ] Step 2: Collect design answers from user
-- [ ] Step 3: Design domain entities for Unit 4
-- [ ] Step 4: Design business rules for Unit 4
-- [ ] Step 5: Design business logic model for Unit 4
-- [ ] Step 6: Write functional design artifacts
+- [x] Step 1: Analyze context — review existing models, store, server, DAP mock, tracker
+- [x] Step 2: Collect design answers from user
+- [x] Step 3: Design domain entities for Unit 4
+- [x] Step 4: Design business rules for Unit 4
+- [x] Step 5: Design business logic model for Unit 4
+- [x] Step 6: Write functional design artifacts
 - [ ] Step 7: Present for approval
 
 ---
@@ -36,7 +36,7 @@ A) Mock only (eval against reconstructed snapshot locals) — simplest, self-con
 B) Both mock and live — mock uses snapshot, live forwards to debugpy via DAP
 C) Mock only for now, live as a future enhancement
 
-[Answer]:
+[Answer]: B
 
 ---
 
@@ -50,7 +50,7 @@ A) No sandboxing — trust the developer (same as Python REPL / debugger console
 B) Restrict to read-only operations — block assignments, imports, side effects
 C) Use `ast.literal_eval` only — only evaluate literal expressions (very limited)
 
-[Answer]:
+[Answer]: A
 
 ---
 
@@ -70,7 +70,7 @@ A) Template-based — fill in function name, arguments from top frame locals, as
 B) LLM-assisted — send snapshot to the connected AI agent and let it generate the test (MCP tool returns the snapshot data formatted for LLM consumption, not the test itself)
 C) Template as default, with an option for LLM-assisted refinement
 
-[Answer]:
+[Answer]: A
 
 ---
 
@@ -82,7 +82,7 @@ A) Return as a string via the MCP tool response (AI agent/developer decides wher
 B) Write to `tests/` directory in the project automatically
 C) Write to a staging location like `~/.errordog/generated_tests/`
 
-[Answer]:
+[Answer]: C
 
 ---
 
@@ -100,7 +100,7 @@ A) Yes — implement it, this is a key differentiator
 B) No — skip for now, `<leader>de` picker is sufficient. Focus on the other two tools.
 C) Implement discovery only — detect running Neovim instances and their sockets, but don't send RPC commands yet
 
-[Answer]:
+[Answer]: B
 
 ---
 
@@ -112,7 +112,7 @@ A) Yes — same server, same `server.py` (add tools alongside `list_errors` and 
 B) Separate module — new `tools/` package, but still registered on the same FastMCP instance
 C) Separate server — new entry point for AI tools
 
-[Answer]:
+[Answer]: A
 
 ---
 
@@ -130,4 +130,4 @@ A) Skip them — only inject parseable values into the eval namespace
 B) Inject as raw strings — `items = "[{'price': 1500, ...}]"` (string, not list)
 C) Skip and report which variables were unavailable
 
-[Answer]:
+[Answer]: A

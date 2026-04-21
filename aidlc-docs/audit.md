@@ -199,3 +199,11 @@
 **Context**: CONSTRUCTION - Functional Design (Unit 4)
 
 ---
+
+## Unit 4 - Functional Design Questions Answered
+**Timestamp**: 2026-04-20T00:00:00Z
+**User Input**: Answered 7 design questions in unit-4-functional-design-plan.md: Q1=B (both mock+live), Q2=A (no sandboxing), Q3=A (template-based), Q4=C (~/.errordog/generated_tests/), Q5=B (skip Neovim RPC), Q6=A (same server.py), Q7=A (skip unparseable)
+**AI Response**: Answers clear, no ambiguities. Generated 3 functional design artifacts: domain-entities.md, business-rules.md, business-logic-model.md at aidlc-docs/construction/unit-4-ai-hypothesis/functional-design/
+**Context**: CONSTRUCTION - Functional Design (Unit 4), Steps 3-6
+
+---
