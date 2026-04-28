@@ -32,14 +32,32 @@ def main() -> None:
 
         store = SnapshotStore()
         snapshots = list(store.snapshot_dir.glob("*.json"))
+
         if not snapshots:
             print("No snapshots to remove.")
             sys.exit(0)
-        print(f"Remove {len(snapshots)} snapshot(s) from {store.snapshot_dir}? [y/N] ", end="")
+
+        # Collect matching dumps
+        dump_dir = Path.home() / ".errordog" / "dumps"
+        dumps = [
+            dump_dir / f"{s.stem}.dump"
+            for s in snapshots
+            if (dump_dir / f"{s.stem}.dump").exists()
+        ]
+
+        # Calculate total size
+        total_size = sum(s.stat().st_size for s in snapshots) + \
+                     sum(d.stat().st_size for d in dumps)
+        total_kb = total_size / 1024
+
+        print(f"Remove {len(snapshots)} snapshot(s) + {len(dumps)} dump(s)?")
+        print(f"Total size: {total_kb:.1f}KB")
+        print("Continue? [y/N] ", end="")
+
         if input().strip().lower() == "y":
-            for p in snapshots:
+            for p in snapshots + dumps:
                 p.unlink()
-            print(f"Removed {len(snapshots)} snapshot(s).")
+            print(f"Removed {len(snapshots)} snapshot(s) and {len(dumps)} dump(s).")
         else:
             print("Aborted.")
 
