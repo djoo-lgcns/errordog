@@ -1,13 +1,39 @@
 [project]
 name = "errordog"
 version = "0.1.0"
-description = "Hybrid debugging and test automation server for AI agents and developers"
-requires-python = ">=3.13"
+description = "Hybrid debugging server — auto-captures Python runtime errors and exposes them to AI agents via MCP and HTTP"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+keywords = ["debugging", "mcp", "ai", "dap", "post-mortem", "snapshot"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "coredumpy>=0.5.0",
     "fastmcp>=2.0.0",
     "pydantic>=2.0.0",
 ]
+
+[project.optional-dependencies]
+ab-test = [
+    "openai>=1.0.0",
+    "requests>=2.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/errordog"
+Repository = "https://github.com/your-org/errordog"
+Issues = "https://github.com/your-org/errordog/issues"
 
 [project.scripts]
 errordog = "errordog.__main__:main"
@@ -28,4 +54,7 @@ testpaths = ["tests"]
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+    "openai>=1.0.0",
+    "requests>=2.0.0",
 ]
