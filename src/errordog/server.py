@@ -50,13 +50,18 @@ def list_errors() -> list[dict]:
 
 @mcp.tool()
 def get_error_details(error_id: str) -> dict:
-    """Return full ESF JSON data for a specific error snapshot.
+    """Return the full raw ESF JSON for a snapshot. Use inspect_error() for debugging.
+
+    Do NOT call this for interactive error diagnosis — inspect_error() returns
+    pre-parsed stack frames and variables in a concise form. Call get_error_details()
+    only when you need the complete raw snapshot structure for programmatic processing
+    (e.g., extracting all frames, all locals, or dump_path).
 
     Args:
         error_id: The unique error identifier (e.g., err_20260310T131600_a3f2b1).
 
     Returns:
-        Full snapshot data or error message dict if not found.
+        Full snapshot data or {"error": "..."} if not found.
     """
     store = _get_store()
     try:
@@ -72,18 +77,26 @@ def get_error_details(error_id: str) -> dict:
 def evaluate_expression(
     expression: str, error_id: str, frame_index: int = 0
 ) -> dict:
-    """Evaluate a Python expression against the locals of a snapshot frame.
+    """Evaluate a Python expression against crash-point locals. Use after inspect_error()
+    to test a hypothesis when the variable values alone are not conclusive
+    (e.g., "type(price)", "len(items)", "items[2]['price']").
+
+    Do NOT use this as the primary investigation method — use inspect_error() and
+    dap_drill_into() first. Call evaluate_expression() only when you need to compute
+    a derived value that isn't directly visible in the stored variables.
 
     Reconstructs the namespace from stored repr strings via ast.literal_eval,
-    then runs eval(). Variables that cannot be parsed are silently skipped.
+    then runs eval(). Variables that cannot be parsed are listed in unavailable_vars
+    and silently excluded from the namespace.
 
     Args:
-        expression: Python expression to evaluate (e.g., "len(items)").
+        expression: Python expression to evaluate (e.g., "type(price)").
         error_id: The snapshot to evaluate against.
         frame_index: Stack frame index (0 = crash point).
 
     Returns:
-        Dict with success, result, error, unavailable_vars, mode.
+        {success, result, error, unavailable_vars, mode}
+        unavailable_vars lists variables excluded due to unparseable repr values.
     """
     store = _get_store()
     try:
@@ -137,31 +150,42 @@ def inspect_error(error_id: str) -> dict:
     """Primary entry point for investigating a captured Python error.
 
     Always call this first when asked to debug, diagnose, or explain an error.
-    Returns the call stack AND local variables at the crash point in a single call.
+    Returns the exception info, call stack, and crash-point variables in one call.
 
-    After this call:
-    - Read stack_frames to understand where the crash occurred.
-    - Read variables to find the bad value at the crash site (frame_index=0).
-    - If a variable has variablesReference > 0, it is a nested object (dict/list/tuple).
-      Call dap_drill_into(error_id, variablesReference) on the ONE variable most
-      directly involved in the crash. Drill one level at a time; stop as soon as
-      you have a concrete value that fully explains the error.
+    Workflow:
+    1. Read exception_type and exception_message to understand what went wrong.
+    2. Read stack_frames to find the crash site (frame_index=0 = innermost frame).
+    3. Read variables for the bad value at the crash site.
+       - variablesReference == 0  → primitive value, readable directly. No further calls needed.
+       - variablesReference  > 0  → nested object (dict/list/tuple). Call dap_drill_into()
+         on the ONE variable most directly involved in the crash. Drill one level at a time;
+         stop as soon as you can name the bad value and explain the error. Do NOT expand
+         every nested variable — only the crash-relevant path.
 
     Args:
         error_id: The snapshot ID to investigate (from list_errors if unknown).
 
     Returns:
         {
+          "exception_type":    str,   e.g. "TypeError"
+          "exception_message": str,   e.g. "can't multiply sequence by non-int of type 'str'"
           "stack_frames": [{frame_index, function_name, file_path, line_number}, ...],
           "variables":    [{name, value, type, variablesReference}, ...]
         }
-        frame_index=0 is the innermost crash point.
-        variablesReference > 0 means the variable is a nested object — use dap_drill_into.
         or {"error": "..."} if the snapshot is not found.
     """
     adapter = _get_adapter(error_id)
     if adapter is None:
         return {"error": f"Snapshot not found: {error_id}"}
+
+    store = _get_store()
+    try:
+        snapshot = store.get_snapshot(error_id)
+        exception_type = snapshot.exception_type
+        exception_message = snapshot.exception_message
+    except Exception:
+        exception_type = ""
+        exception_message = ""
 
     stack_frames = [
         {
@@ -188,7 +212,12 @@ def inspect_error(error_id: str) -> dict:
         else []
     )
 
-    return {"stack_frames": stack_frames, "variables": crash_variables}
+    return {
+        "exception_type": exception_type,
+        "exception_message": exception_message,
+        "stack_frames": stack_frames,
+        "variables": crash_variables,
+    }
 
 
 @mcp.tool()
@@ -253,26 +282,28 @@ def dap_get_variables(error_id: str, frame_index: int = 0) -> list[dict]:
 
 @mcp.tool()
 def dap_drill_into(error_id: str, variables_reference: int) -> list[dict]:
-    """Step 3 of post-mortem investigation. Expand a nested object one level deeper.
-
-    Call this only when the current level's value does not yet reveal the root cause.
-    Use the variablesReference from dap_get_variables() or a prior dap_drill_into().
+    """Expand a nested variable one level deeper. Call after inspect_error() when
+    a variable's variablesReference > 0 and its value is not yet sufficient to
+    explain the root cause.
 
     Hierarchical strategy:
+      - Use the variablesReference from inspect_error()'s variables list, or from
+        a prior dap_drill_into() result.
       - Expand the object most directly related to the crash site first.
-      - If a sub-field also has variablesReference > 0 and is still suspicious,
-        drill into that next — but stop as soon as you have specific values
-        that fully explain the error.
-      - Avoid expanding every nested object; focus on the crash-relevant path.
+      - Each returned field has its own variablesReference:
+          variablesReference == 0  → primitive (string, int, None…). Stop here.
+          variablesReference  > 0  → still nested. Drill further only if needed.
+      - Stop as soon as you can state the bad value and explain the error.
+        Do NOT expand every nested object — focus on the crash-relevant path only.
 
     Args:
         error_id: The snapshot to inspect.
-        variables_reference: The reference integer from dap_get_variables or a
-            previous dap_drill_into call. Must be > 0.
+        variables_reference: The reference integer (> 0) from inspect_error()
+            or a previous dap_drill_into() call.
 
     Returns:
         List of {name, value, type, variablesReference} for the object's fields,
-        or [] if reference is unknown or not expandable.
+        or [] if the reference is unknown or not expandable.
     """
     adapter = _get_adapter(error_id)
     if adapter is None:
