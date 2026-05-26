@@ -132,10 +132,15 @@ def generate_reproduction_test(error_id: str) -> dict:
 
 @mcp.tool()
 def dap_get_stack_frames(error_id: str) -> list[dict]:
-    """Get stack frames for post-mortem DAP inspection of a snapshot.
+    """Step 1 of post-mortem investigation. Get the call stack for an error snapshot.
 
-    Returns frames with frame_index values for use in dap_get_variables.
-    frame_index=0 is the crash point (innermost frame).
+    Recommended workflow:
+      1. dap_get_stack_frames(error_id)          ← you are here
+      2. dap_get_variables(error_id, frame_index=0)
+      3. dap_drill_into(error_id, variablesReference)  [if needed]
+
+    frame_index=0 is the crash point (innermost frame). Proceed to
+    dap_get_variables with frame_index=0 to inspect locals at the crash site.
 
     Args:
         error_id: The snapshot to inspect.
@@ -160,10 +165,15 @@ def dap_get_stack_frames(error_id: str) -> list[dict]:
 
 @mcp.tool()
 def dap_get_variables(error_id: str, frame_index: int = 0) -> list[dict]:
-    """Get variables for a specific stack frame in post-mortem mode.
+    """Step 2 of post-mortem investigation. Get local variables at a stack frame.
 
-    If a variable's variablesReference > 0, it is a nested object (dict, list, tuple).
-    Call dap_drill_into() with that reference to expand it.
+    For variables where variablesReference > 0, the value is a nested object
+    (dict, list, tuple) that can be expanded with dap_drill_into().
+
+    Drilling strategy: identify the variable most directly involved in the crash
+    (e.g., the argument passed to the failing call). Drill into that one first.
+    Only go deeper if the current level does not yet reveal the specific bad value.
+    Stop as soon as you can state the root cause with concrete evidence.
 
     Args:
         error_id: The snapshot to inspect.
@@ -192,18 +202,25 @@ def dap_get_variables(error_id: str, frame_index: int = 0) -> list[dict]:
 
 @mcp.tool()
 def dap_drill_into(error_id: str, variables_reference: int) -> list[dict]:
-    """Drill into a nested object using its variablesReference.
+    """Step 3 of post-mortem investigation. Expand a nested object one level deeper.
 
-    Obtain the variablesReference from dap_get_variables() or a previous
-    dap_drill_into() call. Returns [] if the reference is not expandable.
+    Call this only when the current level's value does not yet reveal the root cause.
+    Use the variablesReference from dap_get_variables() or a prior dap_drill_into().
+
+    Hierarchical strategy:
+      - Expand the object most directly related to the crash site first.
+      - If a sub-field also has variablesReference > 0 and is still suspicious,
+        drill into that next — but stop as soon as you have specific values
+        that fully explain the error.
+      - Avoid expanding every nested object; focus on the crash-relevant path.
 
     Args:
         error_id: The snapshot to inspect.
-        variables_reference: The reference integer from a previous dap_get_variables
-            or dap_drill_into call. Must be > 0.
+        variables_reference: The reference integer from dap_get_variables or a
+            previous dap_drill_into call. Must be > 0.
 
     Returns:
-        List of {name, value, type, variablesReference} for the nested object's fields,
+        List of {name, value, type, variablesReference} for the object's fields,
         or [] if reference is unknown or not expandable.
     """
     adapter = _get_adapter(error_id)
