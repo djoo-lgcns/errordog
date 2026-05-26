@@ -101,6 +101,10 @@ SCENARIOS: list[dict] = [
 @dataclass
 class ConditionResult:
     condition: str                          # "A" or "B"
+    input_tokens: int = 0                   # sum across all turns
+    cached_tokens: int = 0                  # cached_input_tokens (cost saving)
+    output_tokens: int = 0
+    total_tokens: int = 0
     tool_calls: int = 0                     # MCP tool calls (B only)
     tool_names: list[str] = field(default_factory=list)
     response_time_s: float = 0.0
@@ -124,13 +128,33 @@ class ScenarioResult:
 # ── Codex subprocess ──────────────────────────────────────────────────────────
 
 
+@dataclass
+class _Usage:
+    input_tokens: int = 0
+    cached_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def __iadd__(self, other: "_Usage") -> "_Usage":
+        self.input_tokens += other.input_tokens
+        self.cached_tokens += other.cached_tokens
+        self.output_tokens += other.output_tokens
+        return self
+
+
 def run_codex(
     prompt: str,
     codex_cmd: str,
     isolate_mcp: bool,
-) -> tuple[str, float, int, list[str]]:
+) -> tuple[str, float, int, list[str], _Usage]:
     """
-    Run `codex exec` and return (response_text, elapsed_s, tool_call_count, tool_names).
+    Run `codex exec` and return (response_text, elapsed_s, tool_call_count, tool_names, usage).
+
+    Token counts come from `turn.completed` events in the JSONL stream.
+    For multi-turn (Condition B), all turns are summed.
 
     isolate_mcp=True  → fake HOME so ~/.codex/config.toml is not loaded (Condition A)
     isolate_mcp=False → real HOME with errordog MCP configured (Condition B)
@@ -164,24 +188,35 @@ def run_codex(
             timeout=MAX_WAIT_S,
         )
     except subprocess.TimeoutExpired:
-        return f"(timeout after {MAX_WAIT_S}s)", MAX_WAIT_S, 0, []
+        return f"(timeout after {MAX_WAIT_S}s)", MAX_WAIT_S, 0, [], _Usage()
     elapsed = time.perf_counter() - t0
 
-    # Parse tool call events from JSONL stdout
+    # Parse JSONL: collect tool calls and sum token usage across all turns
     tool_calls = 0
     tool_names: list[str] = []
+    usage = _Usage()
+
     for raw in proc.stdout.splitlines():
         try:
             event = json.loads(raw)
-            if (
-                event.get("type") == "item.completed"
-                and event.get("item", {}).get("type") == "tool_call"
-            ):
-                tool_calls += 1
-                name = event["item"].get("name", "unknown")
-                tool_names.append(name)
-        except (json.JSONDecodeError, KeyError):
-            pass
+        except json.JSONDecodeError:
+            continue
+
+        etype = event.get("type")
+
+        # MCP tool call events
+        if etype == "item.completed" and event.get("item", {}).get("type") == "tool_call":
+            tool_calls += 1
+            tool_names.append(event["item"].get("name", "unknown"))
+
+        # Token usage — emitted once per turn, sum across multi-turn
+        elif etype == "turn.completed":
+            u = event.get("usage", {})
+            usage += _Usage(
+                input_tokens=u.get("input_tokens", 0),
+                cached_tokens=u.get("cached_input_tokens", 0),
+                output_tokens=u.get("output_tokens", 0),
+            )
 
     # Read final response from file written by --output-last-message
     out_path = Path(tmp_out)
@@ -189,7 +224,7 @@ def run_codex(
         response = out_path.read_text(encoding="utf-8").strip()
         out_path.unlink(missing_ok=True)
     else:
-        # Fallback: parse agent_message from JSONL
+        # Fallback: parse last agent_message from JSONL
         response = ""
         for raw in reversed(proc.stdout.splitlines()):
             try:
@@ -210,7 +245,7 @@ def run_codex(
         import shutil
         shutil.rmtree(fake_home, ignore_errors=True)
 
-    return response, round(elapsed, 2), tool_calls, tool_names
+    return response, round(elapsed, 2), tool_calls, tool_names, usage
 
 
 # ── Scenario script runner ────────────────────────────────────────────────────
@@ -258,13 +293,17 @@ def run_condition_a(
 ) -> ConditionResult:
     result = ConditionResult(condition="A")
     try:
-        response, elapsed, _, _ = run_codex(
+        response, elapsed, _, _, usage = run_codex(
             PROMPT_A.format(stacktrace=stacktrace),
             codex_cmd=codex_cmd,
             isolate_mcp=True,
         )
         result.final_response = response
         result.response_time_s = elapsed
+        result.input_tokens = usage.input_tokens
+        result.cached_tokens = usage.cached_tokens
+        result.output_tokens = usage.output_tokens
+        result.total_tokens = usage.total
         result.matched_keywords, result.specificity_score, result.root_cause_identified = (
             score_response(response, keywords)
         )
@@ -278,7 +317,7 @@ def run_condition_b(
 ) -> ConditionResult:
     result = ConditionResult(condition="B")
     try:
-        response, elapsed, tool_calls, tool_names = run_codex(
+        response, elapsed, tool_calls, tool_names, usage = run_codex(
             PROMPT_B.format(error_id=error_id),
             codex_cmd=codex_cmd,
             isolate_mcp=False,
@@ -287,6 +326,10 @@ def run_condition_b(
         result.response_time_s = elapsed
         result.tool_calls = tool_calls
         result.tool_names = tool_names
+        result.input_tokens = usage.input_tokens
+        result.cached_tokens = usage.cached_tokens
+        result.output_tokens = usage.output_tokens
+        result.total_tokens = usage.total
         result.matched_keywords, result.specificity_score, result.root_cause_identified = (
             score_response(response, keywords)
         )
@@ -310,10 +353,14 @@ def print_scenario(sr: ScenarioResult) -> None:
     print(_SEP)
     print(f"{'Metric':<28} {'A: Stacktrace':>16} {'B: Errordog':>18}")
     print(_SEP)
+    print(f"{'Input tokens':<28} {a.input_tokens:>16,} {b.input_tokens:>18,}")
+    print(f"{'  (cached)':<28} {a.cached_tokens:>16,} {b.cached_tokens:>18,}")
+    print(f"{'Output tokens':<28} {a.output_tokens:>16,} {b.output_tokens:>18,}")
+    print(f"{'Total tokens':<28} {a.total_tokens:>16,} {b.total_tokens:>18,}")
     print(f"{'MCP tool calls':<28} {'0':>16} {b.tool_calls:>18}")
     if b.tool_names:
         names = ", ".join(b.tool_names)
-        print(f"{'  tools used':<28} {'':>16} {names:>18}")
+        print(f"{'  tools used':<28} {'':>16} {names[:18]:>18}")
     print(f"{'Response time (s)':<28} {a.response_time_s:>16.1f} {b.response_time_s:>18.1f}")
     print(f"{'Specificity score':<28} {a.specificity_score:>15.0%} {b.specificity_score:>17.0%}")
     a_id = f"{_CHECK} Yes" if a.root_cause_identified else f"{_CROSS} Partial"
@@ -344,6 +391,12 @@ def print_summary(results: list[ScenarioResult]) -> None:
     def avg(vals: list) -> float:
         return sum(vals) / len(vals) if vals else 0.0
 
+    a_in = [r.condition_a.input_tokens for r in results if not r.condition_a.error]
+    b_in = [r.condition_b.input_tokens for r in results if not r.condition_b.error]
+    a_out = [r.condition_a.output_tokens for r in results if not r.condition_a.error]
+    b_out = [r.condition_b.output_tokens for r in results if not r.condition_b.error]
+    a_tot = [r.condition_a.total_tokens for r in results if not r.condition_a.error]
+    b_tot = [r.condition_b.total_tokens for r in results if not r.condition_b.error]
     a_time = [r.condition_a.response_time_s for r in results if not r.condition_a.error]
     b_time = [r.condition_b.response_time_s for r in results if not r.condition_b.error]
     b_tools = [r.condition_b.tool_calls for r in results if not r.condition_b.error]
@@ -353,6 +406,9 @@ def print_summary(results: list[ScenarioResult]) -> None:
     b_found = sum(1 for r in results if r.condition_b.root_cause_identified)
     n = len(results)
 
+    print(f"{'Avg input tokens':<28} {avg(a_in):>16,.0f} {avg(b_in):>18,.0f}")
+    print(f"{'Avg output tokens':<28} {avg(a_out):>16,.0f} {avg(b_out):>18,.0f}")
+    print(f"{'Avg total tokens':<28} {avg(a_tot):>16,.0f} {avg(b_tot):>18,.0f}")
     print(f"{'Avg MCP tool calls':<28} {'0':>16} {avg(b_tools):>18.1f}")
     print(f"{'Avg response time (s)':<28} {avg(a_time):>16.1f} {avg(b_time):>18.1f}")
     print(f"{'Avg specificity':<28} {avg(a_spec):>15.0%} {avg(b_spec):>17.0%}")
