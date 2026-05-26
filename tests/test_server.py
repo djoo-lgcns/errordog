@@ -11,7 +11,35 @@ from errordog.server import (
     dap_drill_into,
     dap_get_stack_frames,
     dap_get_variables,
+    list_errors,
 )
+
+
+class TestListErrors:
+    def test_returns_empty_list(self, snapshot_dir: Path) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        result = list_errors()
+        assert result == []
+
+    def test_returns_summaries(self, snapshot_dir: Path) -> None:
+        import json
+        from errordog.models import ErrorSnapshot, Frame
+
+        snap = ErrorSnapshot(
+            error_id="err_list_test_001",
+            timestamp="2026-03-10T13:16:00Z",
+            exception_type="ValueError",
+            exception_message="bad value",
+            frames=[Frame(file_path="/app/main.py", line_number=10, function_name="run")],
+        )
+        (snapshot_dir / f"{snap.error_id}.json").write_text(
+            json.dumps(snap.model_dump(), indent=2)
+        )
+        create_server(snapshot_dir=snapshot_dir)
+        result = list_errors()
+        assert len(result) == 1
+        assert result[0]["error_id"] == snap.error_id
+        assert result[0]["exception_type"] == "ValueError"
 
 
 class TestDapGetStackFrames:

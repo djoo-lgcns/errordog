@@ -32,6 +32,21 @@ def _get_adapter(error_id: str) -> MockAdapter | None:
 
 
 @mcp.tool()
+def list_errors() -> list[dict]:
+    """List captured Python error snapshots. Call this when no error_id is known.
+
+    Returns snapshots sorted by timestamp descending (most recent first).
+    Each entry includes: error_id, timestamp, exception_type, exception_message,
+    file_path, line_number, function_name.
+
+    After getting an error_id, call dap_get_stack_frames(error_id) to investigate.
+    """
+    store = _get_store()
+    summaries = store.list_summaries()
+    return [s.model_dump() for s in summaries]
+
+
+@mcp.tool()
 def dap_get_stack_frames(error_id: str) -> list[dict]:
     """Get call stack for a captured Python error. Call this first.
 

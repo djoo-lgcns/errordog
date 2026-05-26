@@ -7,12 +7,15 @@ use the Errordog MCP tools in the following sequence.
 ## Standard Investigation Sequence
 
 ```
-dap_get_stack_frames(error_id)          # Step 1: locate the crash frame
-  └─ dap_get_variables(error_id, 0)     # Step 2: read locals at crash point
-       └─ dap_drill_into(error_id, ref) # Step 3: expand nested value (if needed)
+list_errors()                           # error_id를 모를 때만
+  └─ dap_get_stack_frames(error_id)     # Step 1: crash site 확인
+       └─ dap_get_variables(error_id, 0) # Step 2: 크래시 시점 변수 읽기
+            └─ dap_drill_into(...)      # Step 3: 중첩 객체 전개 (조건부)
 ```
 
 ### Step-by-step
+
+0. **error_id를 모른다면** → `list_errors()`로 최신 스냅샷 목록을 조회하고 대상 error_id를 선택합니다.
 
 1. **dap_get_stack_frames(error_id)**
    Inspect the call stack. Identify the crash site: `frame_index=0` is the innermost
@@ -46,6 +49,7 @@ After investigation, state in 2–3 sentences:
 
 | Tool | Purpose |
 |------|---------|
+| `list_errors` | List all snapshots (most recent first) — error_id 조회용 |
 | `dap_get_stack_frames` | Get call stack — Step 1 |
 | `dap_get_variables` | Get locals at a frame — Step 2 |
 | `dap_drill_into` | Expand a nested object — Step 3 (conditional) |

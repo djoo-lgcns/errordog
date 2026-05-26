@@ -125,26 +125,31 @@ args = ["run", "--directory", "/path/to/errordog", "python", "-m", "errordog", "
 
 ### Recommended Prompt
 
-```
-Python 에러 ID {error_id} 를 분석해줘.
+에러 ID를 모를 때 (일반적인 경우):
 
-1. dap_get_stack_frames(error_id) 로 콜스택 확인
-2. dap_get_variables(error_id, frame_index=0) 로 크래시 시점 변수 확인
-   — value 필드에 Python repr 전체가 있음. 직접 읽을 수 있으면 바로 원인 설명.
-3. repr이 너무 길거나 잘린 경우에만 dap_drill_into(error_id, variablesReference) 호출
-   — 가장 의심스러운 변수 하나만. 원인 특정되면 즉시 중단.
-구체적인 변수값을 근거로 2-3문장으로 원인 설명.
 ```
+최근에 발생한 Python 에러를 분석해줘.
+```
+
+에러 ID를 알고 있을 때:
+
+```
+err_20260526T120000_a3f2b1 에러를 분석해줘.
+```
+
+AI 에이전트는 AGENTS.md (또는 툴 docstring)의 워크플로우에 따라 자동으로
+`list_errors` → `dap_get_stack_frames` → `dap_get_variables` → (필요시) `dap_drill_into` 순서로 호출합니다.
 
 ---
 
 ## MCP Tools Reference
 
-현재 MCP 서버는 포스트모텀 DAP 탐색을 위한 3개 툴만 노출합니다.  
-툴 스키마 수를 최소화하여 **단순한 에러는 A(stacktrace only) 보다 적은 토큰으로 진단**합니다.
+MCP 서버는 에러 발견부터 변수 탐색까지 4개 툴을 노출합니다.  
+툴 스키마 수를 최소화하여 **단순한 에러는 stacktrace-only 방식보다 적은 토큰으로 진단**합니다.
 
 | Tool | 파라미터 | 설명 |
 |------|---------|------|
+| `list_errors()` | — | 스냅샷 목록 (최신순) — error_id 조회용 |
 | `dap_get_stack_frames(error_id)` | `error_id: str` | 콜스택 (frame_index 포함, 0=크래시 지점) |
 | `dap_get_variables(error_id, frame_index=0)` | `error_id: str`, `frame_index: int` | 로컬 변수 + value repr + variablesReference |
 | `dap_drill_into(error_id, variables_reference)` | `error_id: str`, `variables_reference: int` | 중첩 객체 1레벨 전개 (조건부 사용) |
