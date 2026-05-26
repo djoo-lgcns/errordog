@@ -139,20 +139,29 @@ class _Usage:
     """
     net_input_tokens: int = 0   # Σ fresh tokens per turn (primary metric)
     output_tokens: int = 0       # Σ output tokens across all turns
+    turns: list[dict] = field(default_factory=list)  # per-turn breakdown for --debug
 
     @property
     def total(self) -> int:
         return self.net_input_tokens + self.output_tokens
 
     def add_turn(self, input_tokens: int, cached_tokens: int, output_tokens: int) -> None:
-        self.net_input_tokens += input_tokens - cached_tokens
+        net = input_tokens - cached_tokens
+        self.net_input_tokens += net
         self.output_tokens += output_tokens
+        self.turns.append({
+            "input": input_tokens,
+            "cached": cached_tokens,
+            "net": net,
+            "output": output_tokens,
+        })
 
 
 def run_codex(
     prompt: str,
     codex_cmd: str,
     isolate_mcp: bool,
+    debug: bool = False,
 ) -> tuple[str, float, int, list[str], _Usage]:
     """
     Run `codex exec` and return (response_text, elapsed_s, tool_call_count, tool_names, usage).
@@ -198,8 +207,9 @@ def run_codex(
     tool_calls = 0
     tool_names: list[str] = []
     usage = _Usage()
+    lines = proc.stdout.splitlines()
 
-    for raw in proc.stdout.splitlines():
+    for raw in lines:
         try:
             event = json.loads(raw)
         except json.JSONDecodeError:
@@ -220,6 +230,17 @@ def run_codex(
                 cached_tokens=u.get("cached_input_tokens", 0),
                 output_tokens=u.get("output_tokens", 0),
             )
+
+    if debug:
+        cond_label = "A (no MCP)" if isolate_mcp else "B (MCP)"
+        print(f"\n  [debug {cond_label}] JSONL events: {len(lines)} lines")
+        print(f"  [debug {cond_label}] tool_names: {tool_names}")
+        print(f"  [debug {cond_label}] per-turn tokens:")
+        for i, t in enumerate(usage.turns):
+            print(f"    turn {i+1}: input={t['input']:,}  cached={t['cached']:,}  "
+                  f"net={t['net']:,}  output={t['output']:,}")
+        print(f"  [debug {cond_label}] total net_input={usage.net_input_tokens:,}  "
+              f"output={usage.output_tokens:,}")
 
     # Read final response
     out_path = Path(tmp_out)
@@ -286,7 +307,7 @@ def score_response(
 
 
 def run_condition_a(
-    stacktrace: str, keywords: list[str], codex_cmd: str
+    stacktrace: str, keywords: list[str], codex_cmd: str, debug: bool = False
 ) -> ConditionResult:
     result = ConditionResult(condition="A")
     try:
@@ -294,6 +315,7 @@ def run_condition_a(
             PROMPT_A.format(stacktrace=stacktrace),
             codex_cmd=codex_cmd,
             isolate_mcp=True,
+            debug=debug,
         )
         result.final_response = response
         result.response_time_s = elapsed
@@ -309,7 +331,7 @@ def run_condition_a(
 
 
 def run_condition_b(
-    error_id: str, keywords: list[str], codex_cmd: str
+    error_id: str, keywords: list[str], codex_cmd: str, debug: bool = False
 ) -> ConditionResult:
     result = ConditionResult(condition="B")
     try:
@@ -317,6 +339,7 @@ def run_condition_b(
             PROMPT_B.format(error_id=error_id),
             codex_cmd=codex_cmd,
             isolate_mcp=False,
+            debug=debug,
         )
         result.final_response = response
         result.response_time_s = elapsed
@@ -450,6 +473,11 @@ def main() -> None:
         action="store_true",
         help="Skip running scenario scripts; use the most recent existing snapshot",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print per-turn token breakdown and full tool_names for each run",
+    )
     args = parser.parse_args()
 
     # Verify codex is available
@@ -504,13 +532,13 @@ def main() -> None:
 
         # Step 2: Condition A
         print("  Condition A (stacktrace only) …", end=" ", flush=True)
-        cond_a = run_condition_a(stacktrace, keywords, args.codex)
+        cond_a = run_condition_a(stacktrace, keywords, args.codex, debug=args.debug)
         status_a = f"done ({cond_a.response_time_s}s)" if not cond_a.error else f"ERROR: {cond_a.error[:60]}"
         print(status_a)
 
         # Step 3: Condition B
         print("  Condition B (Errordog MCP) …", end=" ", flush=True)
-        cond_b = run_condition_b(error_id, keywords, args.codex)
+        cond_b = run_condition_b(error_id, keywords, args.codex, debug=args.debug)
         status_b = (
             f"done ({cond_b.tool_calls} tool calls, {cond_b.response_time_s}s)"
             if not cond_b.error
