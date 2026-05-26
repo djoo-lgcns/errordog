@@ -165,21 +165,13 @@ def run_codex(
     net_input_tokens = Σ(input_tokens - cached_input_tokens) per turn.
     """
     tmp_out = tempfile.mktemp(suffix=".txt")
-    cmd = [
-        codex_cmd,
-        "--ask-for-approval", "never",
-        "--sandbox", "read-only",
-        "--ephemeral",                  # no session persistence between runs
-    ]
+    # --ask-for-approval is a top-level codex flag (before exec)
+    # --sandbox, --ephemeral, --ignore-user-config are codex exec flags (after exec)
+    cmd = [codex_cmd, "--ask-for-approval", "never", "exec"]
+    cmd += ["--sandbox", "read-only", "--ephemeral"]
     if isolate_mcp:
         cmd.append("--ignore-user-config")  # Condition A: no MCP servers
-    cmd += [
-        "exec",
-        "--color", "never",
-        "--json",
-        "--output-last-message", tmp_out,
-        "-",
-    ]
+    cmd += ["--color", "never", "--json", "--output-last-message", tmp_out, "-"]
 
     t0 = time.perf_counter()
     try:
