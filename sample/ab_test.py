@@ -165,12 +165,15 @@ def run_codex(
     net_input_tokens = Σ(input_tokens - cached_input_tokens) per turn.
     """
     tmp_out = tempfile.mktemp(suffix=".txt")
-    # --ask-for-approval is a top-level codex flag (before exec)
-    # --sandbox, --ephemeral, --ignore-user-config are codex exec flags (after exec)
-    cmd = [codex_cmd, "--ask-for-approval", "never", "exec"]
-    cmd += ["--sandbox", "read-only", "--ephemeral"]
+    # All flags are codex exec subcommand flags (after exec)
+    # --ephemeral          : no session persistence between runs
+    # --ignore-user-config : Condition A only — skip ~/.codex/config.toml → no MCP servers
+    # -c mcp_servers...    : Condition B only — pre-approve errordog tools without interactive prompt
+    cmd = [codex_cmd, "exec", "--sandbox", "read-only", "--ephemeral"]
     if isolate_mcp:
-        cmd.append("--ignore-user-config")  # Condition A: no MCP servers
+        cmd.append("--ignore-user-config")
+    else:
+        cmd += ["-c", 'mcp_servers.errordog.default_tools_approval_mode="approve"']
     cmd += ["--color", "never", "--json", "--output-last-message", tmp_out, "-"]
 
     t0 = time.perf_counter()
