@@ -1,0 +1,11 @@
+# Codex CLI MCP configuration for Errordog A/B test (Condition B)
+# Copy to ~/.codex/config.toml (or merge with existing config).
+# Adjust --directory to your local errordog clone path.
+
+[mcpServers.errordog]
+command = "uv"
+args = [
+  "run",
+  "--directory", "/path/to/errordog",   # ← change this
+  "python", "-m", "errordog", "serve",
+]

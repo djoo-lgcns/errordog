@@ -11,14 +11,7 @@ def main() -> None:
         from errordog.server import create_server
 
         server = create_server()
-        if "--http" in args:
-            port = 8080
-            for a in args:
-                if a.startswith("--port="):
-                    port = int(a.split("=", 1)[1])
-            server.run(transport="http", host="0.0.0.0", port=port)
-        else:
-            server.run()
+        server.run()
 
     elif args[0] == "run":
         if len(args) < 2:

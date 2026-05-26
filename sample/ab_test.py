@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """
-Errordog A/B Test: Stacktrace-only vs. Errordog MCP tools
+Errordog A/B Test — stacktrace-only vs. Errordog MCP tools (via Codex CLI)
 
-Compares token usage and diagnostic accuracy between:
-  A — GPT receives only the raw stacktrace (traditional approach)
-  B — GPT uses Errordog function-calling tools (dap_get_variables, dap_drill_into, …)
+Compares diagnostic accuracy between:
+  A — Codex receives only the raw stacktrace (traditional approach)
+  B — Codex uses Errordog MCP tools via dap_get_stack_frames / dap_get_variables / dap_drill_into
+
+Both conditions use `codex exec` (non-interactive subprocess).
+Condition A runs with an isolated HOME so MCP servers are not loaded.
+Condition B uses the real HOME where errordog is configured in ~/.codex/config.toml.
 
 Prerequisites:
-  1. Errordog HTTP server running in a separate terminal:
-       errordog serve --http --port=8080
-  2. OPENAI_API_KEY environment variable set
-  3. openai and requests packages installed:
-       pip install openai requests
+  1. codex CLI installed and authenticated  (codex --version)
+  2. errordog MCP added to ~/.codex/config.toml  (see sample/.codex/config.toml for template)
+  3. uv sync run in project root
 
 Usage:
-  python ab_test.py                           # all 5 scenarios
+  python ab_test.py                          # all 5 scenarios
   python ab_test.py --scenarios orders,payment
-  python ab_test.py --model gpt-4o --output results.json
+  python ab_test.py --output results.json
+  python ab_test.py --codex codex            # override codex binary path
+  python ab_test.py --no-run                 # skip re-running scripts, use existing snapshots
 """
 
 from __future__ import annotations
@@ -26,31 +30,35 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-import requests
-
-try:
-    from openai import OpenAI
-except ImportError:
-    print("Error: openai not installed.  Run: pip install openai requests")
-    sys.exit(1)
-
 # ── Config ────────────────────────────────────────────────────────────────────
 
-ERRORDOG_BASE_URL = "http://localhost:8080"
 SAMPLE_DIR = Path(__file__).parent
 PROJECT_DIR = SAMPLE_DIR.parent
-DEFAULT_MODEL = "gpt-4o-mini"
-MAX_TOOL_TURNS = 8  # prevent infinite loops in condition B
+DEFAULT_CODEX = "codex"
+MAX_WAIT_S = 120  # per-condition timeout
 
-SYSTEM_PROMPT = (
-    "You are a Python debugging expert. "
-    "Identify the exact root cause with specific variable values as evidence. "
-    "Be concise — 2-3 sentences maximum."
-)
+PROMPT_A = """\
+A Python error occurred. Identify the exact root cause using only the stacktrace below.
+Do NOT call any external tools. Reply in 2-3 sentences with specific variable values as evidence.
+
+```
+{stacktrace}
+```"""
+
+PROMPT_B = """\
+Use Errordog MCP tools to diagnose error ID: {error_id}
+
+Follow this sequence:
+1. dap_get_stack_frames — inspect the call stack
+2. dap_get_variables(frame_index=0) — get locals at the crash point
+3. dap_drill_into — expand any nested object whose variablesReference > 0
+
+Reply in 2-3 sentences stating the exact root cause with specific variable values."""
 
 # ── Scenarios ─────────────────────────────────────────────────────────────────
 
@@ -71,7 +79,7 @@ SCENARIOS: list[dict] = [
         "name": "inventory",
         "description": "ZeroDivisionError — avg_stock is 0 for discontinued category",
         "script": "inventory.py",
-        "ground_truth_keywords": ["Discontinued", "discontinued", "zero", "avg_stock", "0"],
+        "ground_truth_keywords": ["Discontinued", "discontinued", "avg_stock", "0"],
     },
     {
         "name": "user_auth",
@@ -87,105 +95,19 @@ SCENARIOS: list[dict] = [
     },
 ]
 
-# ── OpenAI tool definitions (mirrors Errordog HTTP endpoints) ─────────────────
-
-ERRORDOG_TOOLS: list[dict] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "list_errors",
-            "description": (
-                "Return list of stored error snapshots sorted by timestamp descending. "
-                "Call this first to get the error_id of the most recent error."
-            ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "dap_get_stack_frames",
-            "description": (
-                "Get stack frames for a snapshot. "
-                "frame_index=0 is the crash point (innermost frame). "
-                "Use the returned frame_index in dap_get_variables."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {"error_id": {"type": "string", "description": "Error ID from list_errors"}},
-                "required": ["error_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "dap_get_variables",
-            "description": (
-                "Get local variables for a specific stack frame. "
-                "If a variable's variablesReference > 0, call dap_drill_into to expand it."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "error_id": {"type": "string"},
-                    "frame_index": {"type": "integer", "default": 0, "description": "0 = crash point"},
-                },
-                "required": ["error_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "dap_drill_into",
-            "description": (
-                "Drill into a nested object (dict, list, tuple) using its variablesReference. "
-                "Returns child variables. Use when variablesReference > 0 from dap_get_variables."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "error_id": {"type": "string"},
-                    "variables_reference": {"type": "integer", "description": "variablesReference from dap_get_variables or previous dap_drill_into"},
-                },
-                "required": ["error_id", "variables_reference"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "evaluate_expression",
-            "description": "Evaluate a Python expression against the locals of a snapshot frame.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {"type": "string", "description": "Python expression to evaluate"},
-                    "error_id": {"type": "string"},
-                    "frame_index": {"type": "integer", "default": 0},
-                },
-                "required": ["expression", "error_id"],
-            },
-        },
-    },
-]
-
 # ── Result dataclasses ────────────────────────────────────────────────────────
 
 
 @dataclass
 class ConditionResult:
-    condition: str                    # "A" or "B"
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    tool_calls: int = 0               # B only
+    condition: str                          # "A" or "B"
+    tool_calls: int = 0                     # MCP tool calls (B only)
+    tool_names: list[str] = field(default_factory=list)
     response_time_s: float = 0.0
     final_response: str = ""
     matched_keywords: list[str] = field(default_factory=list)
-    specificity_score: float = 0.0   # matched / total keywords
-    root_cause_identified: bool = False
+    specificity_score: float = 0.0          # matched / total keywords
+    root_cause_identified: bool = False     # score >= 0.5
     error: str = ""
 
 
@@ -199,54 +121,106 @@ class ScenarioResult:
     condition_b: ConditionResult
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Codex subprocess ──────────────────────────────────────────────────────────
 
 
-def check_server() -> bool:
-    """Return True if Errordog HTTP server is reachable."""
+def run_codex(
+    prompt: str,
+    codex_cmd: str,
+    isolate_mcp: bool,
+) -> tuple[str, float, int, list[str]]:
+    """
+    Run `codex exec` and return (response_text, elapsed_s, tool_call_count, tool_names).
+
+    isolate_mcp=True  → fake HOME so ~/.codex/config.toml is not loaded (Condition A)
+    isolate_mcp=False → real HOME with errordog MCP configured (Condition B)
+    """
+    tmp_out = tempfile.mktemp(suffix=".txt")
+    cmd = [
+        codex_cmd,
+        "--ask-for-approval", "never",
+        "--sandbox", "read-only",
+        "exec",
+        "--color", "never",
+        "--json",
+        "--output-last-message", tmp_out,
+        "-",
+    ]
+
+    env = os.environ.copy()
+    fake_home: str | None = None
+    if isolate_mcp:
+        fake_home = tempfile.mkdtemp(prefix="ab_cond_a_")
+        env["HOME"] = fake_home
+
+    t0 = time.perf_counter()
     try:
-        resp = requests.get(f"{ERRORDOG_BASE_URL}/health", timeout=3)
-        return resp.status_code == 200
-    except Exception:
-        return False
-
-
-def call_errordog_http(tool_name: str, args: dict) -> str:
-    """Call an Errordog HTTP endpoint and return JSON string result."""
-    try:
-        resp = requests.post(
-            f"{ERRORDOG_BASE_URL}/tools/{tool_name}",
-            json=args,
-            timeout=10,
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=MAX_WAIT_S,
         )
-        return json.dumps(resp.json())
-    except Exception as exc:
-        return json.dumps({"error": str(exc)})
+    except subprocess.TimeoutExpired:
+        return f"(timeout after {MAX_WAIT_S}s)", MAX_WAIT_S, 0, []
+    elapsed = time.perf_counter() - t0
+
+    # Parse tool call events from JSONL stdout
+    tool_calls = 0
+    tool_names: list[str] = []
+    for raw in proc.stdout.splitlines():
+        try:
+            event = json.loads(raw)
+            if (
+                event.get("type") == "item.completed"
+                and event.get("item", {}).get("type") == "tool_call"
+            ):
+                tool_calls += 1
+                name = event["item"].get("name", "unknown")
+                tool_names.append(name)
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Read final response from file written by --output-last-message
+    out_path = Path(tmp_out)
+    if out_path.exists():
+        response = out_path.read_text(encoding="utf-8").strip()
+        out_path.unlink(missing_ok=True)
+    else:
+        # Fallback: parse agent_message from JSONL
+        response = ""
+        for raw in reversed(proc.stdout.splitlines()):
+            try:
+                event = json.loads(raw)
+                if (
+                    event.get("type") == "item.completed"
+                    and event.get("item", {}).get("type") == "agent_message"
+                ):
+                    response = event["item"].get("text", "")
+                    break
+            except (json.JSONDecodeError, KeyError):
+                continue
+        if not response and proc.stderr:
+            response = f"(stderr) {proc.stderr[:300]}"
+
+    # Clean up fake home
+    if fake_home:
+        import shutil
+        shutil.rmtree(fake_home, ignore_errors=True)
+
+    return response, round(elapsed, 2), tool_calls, tool_names
+
+
+# ── Scenario script runner ────────────────────────────────────────────────────
 
 
 def run_scenario_script(script_name: str) -> tuple[str, str | None]:
     """
-    Run a sample scenario script and return (stderr_output, error_id).
-    The script auto-saves an Errordog snapshot via `import errordog.tracker`.
+    Run a sample script, return (stacktrace_text, error_id).
+    Strips the [errordog] capture line so Condition A only sees the raw traceback.
     """
-    script_path = SAMPLE_DIR / script_name
-    result = subprocess.run(
-        [sys.executable, str(script_path)],
-        capture_output=True,
-        text=True,
-        cwd=str(PROJECT_DIR),  # ensure errordog is importable via uv
-    )
-    # Combine stderr lines, strip the "[errordog] Snapshot captured: ..." line
-    # to give Condition A the same info a developer would see
-    lines = result.stderr.splitlines()
-    snapshot_line = next((l for l in lines if "[errordog] Snapshot captured:" in l), None)
-    error_id = snapshot_line.split("Snapshot captured:")[-1].strip() if snapshot_line else None
-    clean_stderr = "\n".join(l for l in lines if "[errordog]" not in l)
-    return clean_stderr.strip(), error_id
-
-
-def _run_with_uv(script_name: str) -> tuple[str, str | None]:
-    """Fallback: run via `uv run` if direct python fails."""
     script_path = SAMPLE_DIR / script_name
     result = subprocess.run(
         ["uv", "run", "--directory", str(PROJECT_DIR), "python", str(script_path)],
@@ -254,116 +228,67 @@ def _run_with_uv(script_name: str) -> tuple[str, str | None]:
         text=True,
     )
     lines = result.stderr.splitlines()
-    snapshot_line = next((l for l in lines if "[errordog] Snapshot captured:" in l), None)
-    error_id = snapshot_line.split("Snapshot captured:")[-1].strip() if snapshot_line else None
+    snapshot_line = next(
+        (l for l in lines if "[errordog] Snapshot captured:" in l), None
+    )
+    error_id = (
+        snapshot_line.split("Snapshot captured:")[-1].strip() if snapshot_line else None
+    )
     clean_stderr = "\n".join(l for l in lines if "[errordog]" not in l)
     return clean_stderr.strip(), error_id
 
 
-def score_response(text: str, keywords: list[str]) -> tuple[list[str], float, bool]:
-    """Return (matched_keywords, specificity_score, root_cause_identified)."""
+# ── Scoring ───────────────────────────────────────────────────────────────────
+
+
+def score_response(
+    text: str, keywords: list[str]
+) -> tuple[list[str], float, bool]:
     text_lower = text.lower()
     matched = [kw for kw in keywords if kw.lower() in text_lower]
     score = len(matched) / len(keywords) if keywords else 0.0
-    identified = score >= 0.5  # at least half the keywords → root cause found
-    return matched, round(score, 2), identified
+    return matched, round(score, 2), score >= 0.5
 
 
-# ── Condition A: Stacktrace only ──────────────────────────────────────────────
+# ── Condition runners ─────────────────────────────────────────────────────────
 
 
 def run_condition_a(
-    stacktrace: str,
-    keywords: list[str],
-    client: OpenAI,
-    model: str,
+    stacktrace: str, keywords: list[str], codex_cmd: str
 ) -> ConditionResult:
     result = ConditionResult(condition="A")
-    prompt = (
-        "A Python error occurred. Identify the exact root cause.\n\n"
-        f"```\n{stacktrace}\n```"
-    )
     try:
-        t0 = time.perf_counter()
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=300,
+        response, elapsed, _, _ = run_codex(
+            PROMPT_A.format(stacktrace=stacktrace),
+            codex_cmd=codex_cmd,
+            isolate_mcp=True,
         )
-        result.response_time_s = round(time.perf_counter() - t0, 2)
-        usage = response.usage
-        result.prompt_tokens = usage.prompt_tokens
-        result.completion_tokens = usage.completion_tokens
-        result.total_tokens = usage.total_tokens
-        result.final_response = response.choices[0].message.content or ""
+        result.final_response = response
+        result.response_time_s = elapsed
         result.matched_keywords, result.specificity_score, result.root_cause_identified = (
-            score_response(result.final_response, keywords)
+            score_response(response, keywords)
         )
     except Exception as exc:
         result.error = str(exc)
     return result
 
 
-# ── Condition B: Errordog tools ───────────────────────────────────────────────
-
-
 def run_condition_b(
-    error_id: str,
-    keywords: list[str],
-    client: OpenAI,
-    model: str,
+    error_id: str, keywords: list[str], codex_cmd: str
 ) -> ConditionResult:
     result = ConditionResult(condition="B")
-    messages: list[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"Use the Errordog tools to diagnose error `{error_id}`. "
-                "Start with dap_get_stack_frames, inspect variables at the crash frame, "
-                "drill into nested objects as needed, then state the exact root cause."
-            ),
-        },
-    ]
     try:
-        t0 = time.perf_counter()
-        for _ in range(MAX_TOOL_TURNS):
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=ERRORDOG_TOOLS,
-                tool_choice="auto",
-                max_tokens=500,
-            )
-            usage = response.usage
-            result.prompt_tokens += usage.prompt_tokens
-            result.completion_tokens += usage.completion_tokens
-            result.total_tokens += usage.total_tokens
-
-            choice = response.choices[0]
-            messages.append(choice.message.model_dump(exclude_unset=False))
-
-            if choice.finish_reason == "stop":
-                result.final_response = choice.message.content or ""
-                break
-
-            if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-                for tc in choice.message.tool_calls:
-                    result.tool_calls += 1
-                    args = json.loads(tc.function.arguments)
-                    tool_result = call_errordog_http(tc.function.name, args)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": tool_result,
-                    })
-
-        result.response_time_s = round(time.perf_counter() - t0, 2)
+        response, elapsed, tool_calls, tool_names = run_codex(
+            PROMPT_B.format(error_id=error_id),
+            codex_cmd=codex_cmd,
+            isolate_mcp=False,
+        )
+        result.final_response = response
+        result.response_time_s = elapsed
+        result.tool_calls = tool_calls
+        result.tool_names = tool_names
         result.matched_keywords, result.specificity_score, result.root_cause_identified = (
-            score_response(result.final_response, keywords)
+            score_response(response, keywords)
         )
     except Exception as exc:
         result.error = str(exc)
@@ -372,9 +297,9 @@ def run_condition_b(
 
 # ── Output ────────────────────────────────────────────────────────────────────
 
+_SEP = "─" * 67
 _CHECK = "✓"
 _CROSS = "✗"
-_SEP = "─" * 67
 
 
 def print_scenario(sr: ScenarioResult) -> None:
@@ -385,12 +310,11 @@ def print_scenario(sr: ScenarioResult) -> None:
     print(_SEP)
     print(f"{'Metric':<28} {'A: Stacktrace':>16} {'B: Errordog':>18}")
     print(_SEP)
-    print(f"{'Input tokens':<28} {a.prompt_tokens:>16,} {b.prompt_tokens:>18,}")
-    print(f"{'Output tokens':<28} {a.completion_tokens:>16,} {b.completion_tokens:>18,}")
-    print(f"{'Total tokens':<28} {a.total_tokens:>16,} {b.total_tokens:>18,}")
-    print(f"{'Tool calls':<28} {0:>16} {b.tool_calls:>18}")
+    print(f"{'MCP tool calls':<28} {'0':>16} {b.tool_calls:>18}")
+    if b.tool_names:
+        names = ", ".join(b.tool_names)
+        print(f"{'  tools used':<28} {'':>16} {names:>18}")
     print(f"{'Response time (s)':<28} {a.response_time_s:>16.1f} {b.response_time_s:>18.1f}")
-    kw_total = len(sr.condition_a.matched_keywords or b.matched_keywords or [])
     print(f"{'Specificity score':<28} {a.specificity_score:>15.0%} {b.specificity_score:>17.0%}")
     a_id = f"{_CHECK} Yes" if a.root_cause_identified else f"{_CROSS} Partial"
     b_id = f"{_CHECK} Yes" if b.root_cause_identified else f"{_CROSS} Partial"
@@ -418,10 +342,8 @@ def print_summary(results: list[ScenarioResult]) -> None:
     print(f"{'─' * 67}")
 
     def avg(vals: list) -> float:
-        return sum(vals) / len(vals) if vals else 0
+        return sum(vals) / len(vals) if vals else 0.0
 
-    a_tokens = [r.condition_a.total_tokens for r in results if not r.condition_a.error]
-    b_tokens = [r.condition_b.total_tokens for r in results if not r.condition_b.error]
     a_time = [r.condition_a.response_time_s for r in results if not r.condition_a.error]
     b_time = [r.condition_b.response_time_s for r in results if not r.condition_b.error]
     b_tools = [r.condition_b.tool_calls for r in results if not r.condition_b.error]
@@ -431,8 +353,7 @@ def print_summary(results: list[ScenarioResult]) -> None:
     b_found = sum(1 for r in results if r.condition_b.root_cause_identified)
     n = len(results)
 
-    print(f"{'Avg total tokens':<28} {avg(a_tokens):>16,.0f} {avg(b_tokens):>18,.0f}")
-    print(f"{'Avg tool calls':<28} {'0':>16} {avg(b_tools):>18.1f}")
+    print(f"{'Avg MCP tool calls':<28} {'0':>16} {avg(b_tools):>18.1f}")
     print(f"{'Avg response time (s)':<28} {avg(a_time):>16.1f} {avg(b_time):>18.1f}")
     print(f"{'Avg specificity':<28} {avg(a_spec):>15.0%} {avg(b_spec):>17.0%}")
     print(f"{'Root cause found':<28} {a_found}/{n} ({a_found/n:.0%}){b_found:>14}/{n} ({b_found/n:.0%})")
@@ -442,88 +363,105 @@ def print_summary(results: list[ScenarioResult]) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
+def check_codex(codex_cmd: str) -> bool:
+    try:
+        result = subprocess.run(
+            [codex_cmd, "--version"], capture_output=True, text=True, timeout=10
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Errordog A/B test")
+    parser = argparse.ArgumentParser(description="Errordog A/B test via Codex CLI")
     parser.add_argument(
         "--scenarios",
         default="all",
-        help="Comma-separated scenario names (all | orders,payment,…)",
+        help="Comma-separated scenario names (default: all)",
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"OpenAI model (default: {DEFAULT_MODEL})")
-    parser.add_argument("--output", default="", help="Save JSON results to this file path")
+    parser.add_argument(
+        "--codex",
+        default=DEFAULT_CODEX,
+        help=f"Path to codex binary (default: {DEFAULT_CODEX})",
+    )
+    parser.add_argument(
+        "--output",
+        default="",
+        help="Save JSON results to this file",
+    )
     parser.add_argument(
         "--no-run",
         action="store_true",
-        help="Skip running scenario scripts (use existing snapshots)",
+        help="Skip running scenario scripts; use the most recent existing snapshot",
     )
     args = parser.parse_args()
 
-    # Validate API key
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        print("Error: OPENAI_API_KEY environment variable not set.")
-        sys.exit(1)
-
-    # Validate server
-    if not check_server():
-        print(
-            f"Error: Errordog HTTP server not reachable at {ERRORDOG_BASE_URL}\n"
-            "Start it with:  errordog serve --http --port=8080"
-        )
+    # Verify codex is available
+    if not check_codex(args.codex):
+        print(f"Error: codex CLI not found at '{args.codex}'")
+        print("Install: https://github.com/openai/codex")
         sys.exit(1)
 
     # Filter scenarios
-    selected_names = set(args.scenarios.split(",")) if args.scenarios != "all" else None
-    scenarios = [s for s in SCENARIOS if selected_names is None or s["name"] in selected_names]
+    selected = set(args.scenarios.split(",")) if args.scenarios != "all" else None
+    scenarios = [s for s in SCENARIOS if selected is None or s["name"] in selected]
     if not scenarios:
-        print(f"Error: No scenarios match '{args.scenarios}'")
+        print(f"Error: no scenarios match '{args.scenarios}'")
         sys.exit(1)
 
-    client = OpenAI(api_key=api_key)
-
-    print(f"\nErrordog A/B Test  |  model={args.model}  |  scenarios={len(scenarios)}")
-    print(f"Condition A: stacktrace only  |  Condition B: Errordog tools\n")
+    print(f"\nErrordog A/B Test  |  codex={args.codex}  |  scenarios={len(scenarios)}")
+    print("Condition A: stacktrace only (MCP isolated)")
+    print("Condition B: Errordog MCP tools (dap_get_stack_frames → dap_get_variables → dap_drill_into)\n")
 
     all_results: list[ScenarioResult] = []
 
     for scenario in scenarios:
         name = scenario["name"]
-        print(f"Running scenario: {name} …", end=" ", flush=True)
+        print(f"── Scenario: {name} ──")
 
-        # Step 1: Run script to capture stacktrace + snapshot
+        # Step 1: run script to generate snapshot
         stacktrace = ""
         error_id = ""
 
         if args.no_run:
-            # Use most recent snapshot from Errordog
-            resp = requests.post(f"{ERRORDOG_BASE_URL}/tools/list_errors", json={}, timeout=5)
-            errors = resp.json()
-            error_id = errors[0]["error_id"] if errors else ""
-            stacktrace = f"(existing snapshot: {error_id})"
+            # Import errordog store directly to get most recent snapshot
+            sys.path.insert(0, str(PROJECT_DIR / "src"))
+            from errordog.store import SnapshotStore
+            store = SnapshotStore()
+            summaries = store.list_summaries()
+            if summaries:
+                error_id = summaries[0].error_id
+                stacktrace = f"(existing snapshot: {error_id})"
+            else:
+                print("  SKIP — no snapshots found")
+                continue
         else:
-            stderr, eid = run_scenario_script(scenario["script"])
-            if not eid:
-                # Fallback to uv run
-                stderr, eid = _run_with_uv(scenario["script"])
-            stacktrace = stderr
-            error_id = eid or ""
+            print(f"  Running {scenario['script']} …", end=" ", flush=True)
+            stacktrace, error_id = run_scenario_script(scenario["script"])
+            if error_id:
+                print(f"snapshot={error_id[:32]}…")
+            else:
+                print("SKIP (no snapshot captured)")
+                continue
 
-        if not error_id:
-            print("SKIP (no snapshot)")
-            continue
-
-        print(f"snapshot={error_id[:28]}…")
         keywords = scenario["ground_truth_keywords"]
 
         # Step 2: Condition A
-        print("  Running condition A (stacktrace only) …", end=" ", flush=True)
-        cond_a = run_condition_a(stacktrace, keywords, client, args.model)
-        print(f"done ({cond_a.total_tokens} tokens, {cond_a.response_time_s}s)")
+        print("  Condition A (stacktrace only) …", end=" ", flush=True)
+        cond_a = run_condition_a(stacktrace, keywords, args.codex)
+        status_a = f"done ({cond_a.response_time_s}s)" if not cond_a.error else f"ERROR: {cond_a.error[:60]}"
+        print(status_a)
 
         # Step 3: Condition B
-        print("  Running condition B (Errordog tools) …", end=" ", flush=True)
-        cond_b = run_condition_b(error_id, keywords, client, args.model)
-        print(f"done ({cond_b.total_tokens} tokens, {cond_b.tool_calls} tool calls, {cond_b.response_time_s}s)")
+        print("  Condition B (Errordog MCP) …", end=" ", flush=True)
+        cond_b = run_condition_b(error_id, keywords, args.codex)
+        status_b = (
+            f"done ({cond_b.tool_calls} tool calls, {cond_b.response_time_s}s)"
+            if not cond_b.error
+            else f"ERROR: {cond_b.error[:60]}"
+        )
+        print(status_b)
 
         sr = ScenarioResult(
             scenario_name=name,
@@ -538,21 +476,17 @@ def main() -> None:
 
     print_summary(all_results)
 
-    # Optionally save JSON
     if args.output:
-        output_path = Path(args.output)
-        output_path.write_text(
+        out = Path(args.output)
+        out.write_text(
             json.dumps(
-                {
-                    "model": args.model,
-                    "results": [asdict(r) for r in all_results],
-                },
+                {"results": [asdict(r) for r in all_results]},
                 indent=2,
                 ensure_ascii=False,
             ),
             encoding="utf-8",
         )
-        print(f"Results saved to {output_path}")
+        print(f"Results saved → {out}")
 
 
 if __name__ == "__main__":

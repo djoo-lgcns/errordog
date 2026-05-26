@@ -3,7 +3,6 @@
 from pathlib import Path
 
 from fastmcp import FastMCP
-from starlette.responses import JSONResponse
 
 from errordog.dap.mock import MockAdapter
 from errordog.evaluator import eval_expression, eval_expression_coredumpy
@@ -211,84 +210,6 @@ def dap_drill_into(error_id: str, variables_reference: int) -> list[dict]:
     if adapter is None:
         return [{"error": f"Snapshot not found: {error_id}"}]
     return adapter._drilldown.get(variables_reference, [])
-
-
-# ── HTTP transport endpoints ──────────────────────────────────────────────────
-
-
-@mcp.custom_route("/health", methods=["GET"])
-async def health(request):  # type: ignore[no-untyped-def]
-    return JSONResponse({"status": "ok", "name": "errordog"})
-
-
-@mcp.custom_route("/openapi.json", methods=["GET"])
-async def openapi_spec(request):  # type: ignore[no-untyped-def]
-    """Auto-generate OpenAPI 3.0 spec from registered MCP tools."""
-    tools = await mcp.list_tools()
-    paths: dict = {}
-    for tool in tools:
-        mcp_tool = tool.to_mcp_tool()
-        paths[f"/tools/{tool.name}"] = {
-            "post": {
-                "operationId": tool.name,
-                "summary": (tool.description or tool.name).split("\n")[0],
-                "requestBody": {
-                    "required": True,
-                    "content": {"application/json": {"schema": mcp_tool.inputSchema}},
-                },
-                "responses": {"200": {"description": "Success", "content": {"application/json": {"schema": {}}}}},
-            }
-        }
-    return JSONResponse({
-        "openapi": "3.0.0",
-        "info": {"title": "Errordog API", "version": "1.0.0", "description": "Python runtime error snapshot analysis API"},
-        "paths": paths,
-    })
-
-
-@mcp.custom_route("/tools/list_errors", methods=["POST"])
-async def http_list_errors(request):  # type: ignore[no-untyped-def]
-    return JSONResponse(list_errors())
-
-
-@mcp.custom_route("/tools/get_error_details", methods=["POST"])
-async def http_get_error_details(request):  # type: ignore[no-untyped-def]
-    body = await request.json()
-    return JSONResponse(get_error_details(body.get("error_id", "")))
-
-
-@mcp.custom_route("/tools/evaluate_expression", methods=["POST"])
-async def http_evaluate_expression(request):  # type: ignore[no-untyped-def]
-    body = await request.json()
-    return JSONResponse(evaluate_expression(
-        body.get("expression", ""),
-        body.get("error_id", ""),
-        body.get("frame_index", 0),
-    ))
-
-
-@mcp.custom_route("/tools/generate_reproduction_test", methods=["POST"])
-async def http_generate_reproduction_test(request):  # type: ignore[no-untyped-def]
-    body = await request.json()
-    return JSONResponse(generate_reproduction_test(body.get("error_id", "")))
-
-
-@mcp.custom_route("/tools/dap_get_stack_frames", methods=["POST"])
-async def http_dap_get_stack_frames(request):  # type: ignore[no-untyped-def]
-    body = await request.json()
-    return JSONResponse(dap_get_stack_frames(body.get("error_id", "")))
-
-
-@mcp.custom_route("/tools/dap_get_variables", methods=["POST"])
-async def http_dap_get_variables(request):  # type: ignore[no-untyped-def]
-    body = await request.json()
-    return JSONResponse(dap_get_variables(body.get("error_id", ""), body.get("frame_index", 0)))
-
-
-@mcp.custom_route("/tools/dap_drill_into", methods=["POST"])
-async def http_dap_drill_into(request):  # type: ignore[no-untyped-def]
-    body = await request.json()
-    return JSONResponse(dap_drill_into(body.get("error_id", ""), body.get("variables_reference", 0)))
 
 
 def create_server(snapshot_dir: Path | None = None) -> FastMCP:
