@@ -16,21 +16,30 @@ Python 런타임 에러 자동 분석 파이프라인 데모 및 KPI 측정용 �
 
 ```bash
 # 1. errordog 설치 확인 (debugger-v4 루트에서)
-uv run python -m errordog --help
+uv sync
 
 # 2. 시나리오 실행 (에러 자동 캡처)
-cd sample
-python orders.py       # TypeError 스냅샷 저장
-python payment.py      # ValueError 스냅샷 저장
-python inventory.py    # ZeroDivisionError 스냅샷 저장
-python user_auth.py    # KeyError 스냅샷 저장
-python report_gen.py   # TypeError 스냅샷 저장
+uv run --directory .. python orders.py      # TypeError 스냅샷 저장
+uv run --directory .. python payment.py     # ValueError 스냅샷 저장
+uv run --directory .. python inventory.py   # ZeroDivisionError 스냅샷 저장
+uv run --directory .. python user_auth.py   # KeyError 스냅샷 저장
+uv run --directory .. python report_gen.py  # TypeError 스냅샷 저장
 
 # 3. MCP 서버 시작 (Claude Code용)
 uv run --directory .. python -m errordog serve
+```
 
-# 4. HTTP 서버 시작 (ChatGPT Custom GPT / Codex용)
-uv run --directory .. python -m errordog serve --http --port=8080
+## A/B 테스트 실행
+
+```bash
+# 전제: codex CLI 설치 및 인증
+uv run --directory .. python ab_test.py
+
+# 디버그 모드 (per-turn 토큰 상세 출력)
+uv run --directory .. python ab_test.py --debug
+
+# 특정 시나리오만
+uv run --directory .. python ab_test.py --scenarios orders,payment
 ```
 
 ## KPI 측정: Before / After 비교
@@ -40,7 +49,7 @@ uv run --directory .. python -m errordog serve --http --port=8080
 ### Before — 수동 방식
 
 1. 스크립트 실행 → 터미널에 traceback 출력
-2. 에러 메시지 + traceback 전체를 ChatGPT에 복붙
+2. 에러 메시지 + traceback 전체를 AI에 복붙
 3. "이 에러 원인이 뭔가요?" 질문
 4. AI 응답 확인 후 코드 수정 시도
 
@@ -49,11 +58,10 @@ uv run --directory .. python -m errordog serve --http --port=8080
 ### After — Errordog + AI 방식
 
 1. 스크립트 실행 → 자동 스냅샷 저장
-2. AI (Claude Code 또는 ChatGPT)가 MCP/HTTP 툴로 조회:
-   - `list_errors()` → 최신 에러 확인
+2. AI (Claude Code 또는 Codex CLI)가 MCP 툴로 조회:
    - `dap_get_stack_frames(error_id)` → 콜스택 탐색
-   - `dap_get_variables(error_id, frame_index)` → 로컬 변수 확인
-   - `dap_drill_into(error_id, variables_reference)` → 중첩 객체 drill-down
+   - `dap_get_variables(error_id, frame_index=0)` → 로컬 변수 확인
+   - `dap_drill_into(error_id, variables_reference)` → 중첩 객체 drill-down (필요 시만)
 3. AI 진단 결과 확인
 
 **측정 포인트**: 에러 발생 ~ 원인 특정 완료까지 분(min)
@@ -69,45 +77,50 @@ uv run --directory .. python -m errordog serve --http --port=8080
 | report_gen.py (TypeError) | | | |
 | **평균** | | | |
 
-> 참고 기준: 수동 방식 평균 5~10분 / Errordog 방식 평균 1~2분 (툴 콜 3~5회)
-
 ## DAP 드릴다운 예시 (AI 관점)
 
 `payment.py`의 중첩 discount 객체를 분석하는 AI 툴 콜 체인:
 
 ```
-1. list_errors()
-   → error_id: "err_20260526T120000_abc123"
-
-2. dap_get_stack_frames("err_20260526T120000_abc123")
+1. dap_get_stack_frames("err_20260526T120000_abc123")
    → frame_index=0: apply_discount / payment.py:14
 
-3. dap_get_variables("err_20260526T120000_abc123", frame_index=0)
-   → payment: {value: "{'amount': 500000, 'discount': {...}}", variablesReference: 1001}
-   → discounted: -250000.0
+2. dap_get_variables("err_20260526T120000_abc123", frame_index=0)
+   → payment  value="{'amount': 500000, 'discount': {'rate': 1.5, 'code': 'INVALID_CODE'}}"
+              variablesReference=1001
+   → discounted  value="-250000.0"  variablesReference=0
 
-4. dap_drill_into("err_20260526T120000_abc123", 1001)
-   → amount: 500000
-   → discount: {variablesReference: 1002}
+   ✅ value 필드에서 rate=1.5가 직접 보임 → dap_drill_into 불필요
+   결론: discount.rate가 1을 초과하여 음수 금액 발생
+```
 
-5. dap_drill_into("err_20260526T120000_abc123", 1002)
-   → code: "INVALID_CODE"
-   → rate: 1.5   ← 원인 특정: rate가 1을 초과
+drill이 필요한 경우 (긴 리스트):
+
+```
+2. dap_get_variables("err_...", frame_index=0)
+   → items  value="[{...qty:2}, {...qty:1}, {'price': 'free', 'qty': 3}]"
+            variablesReference=2001
+   (어느 index인지 불명확 → drill 필요)
+
+3. dap_drill_into("err_...", 2001)
+   → [2]  value="{'price': 'free', 'qty': 3}"  ← items[2].price가 문자열
 ```
 
 ## Codex CLI 연동
 
-`.codex/config.yaml` 파일이 이 디렉토리에 포함되어 있습니다.  
-Codex CLI 설치 후 이 디렉토리에서 실행하면 errordog MCP가 자동 연결됩니다.
+`~/.codex/config.toml`:
 
-## ChatGPT Custom GPT Actions 연동
-
-```bash
-# HTTP 서버 시작
-uv run --directory .. python -m errordog serve --http --port=8080
-
-# OpenAPI 스펙 확인 (ChatGPT Actions 등록용)
-curl http://localhost:8080/openapi.json
+```toml
+[mcpServers.errordog]
+command = "uv"
+args = ["run", "--directory", "/path/to/debugger-v4", "python", "-m", "errordog", "serve"]
 ```
 
-ngrok 등으로 공개 URL을 만들면 ChatGPT Custom GPT의 Actions에 등록 가능합니다.
+또는 A/B 테스트처럼 `-c` 플래그로 인라인 주입 (config 파일 불필요):
+
+```bash
+codex exec --ephemeral --ignore-user-config \
+  -c 'mcp_servers.errordog.command="uv"' \
+  -c 'mcp_servers.errordog.args=["run","--directory","/path/to/errordog","python","-m","errordog","serve"]' \
+  - <<< "dap_get_stack_frames로 err_XXX 분석해줘"
+```
