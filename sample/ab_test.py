@@ -165,15 +165,20 @@ def run_codex(
     net_input_tokens = Σ(input_tokens - cached_input_tokens) per turn.
     """
     tmp_out = tempfile.mktemp(suffix=".txt")
-    # All flags are codex exec subcommand flags (after exec)
-    # --ephemeral          : no session persistence between runs
-    # --ignore-user-config : Condition A only — skip ~/.codex/config.toml → no MCP servers
-    # -c mcp_servers...    : Condition B only — pre-approve errordog tools without interactive prompt
-    cmd = [codex_cmd, "exec", "--sandbox", "read-only", "--ephemeral"]
-    if isolate_mcp:
-        cmd.append("--ignore-user-config")
-    else:
-        cmd += ["-c", 'mcp_servers.errordog.default_tools_approval_mode="approve"']
+    # Both conditions start from the same clean slate (--ignore-user-config).
+    # Condition B additionally injects errordog MCP via -c so the only
+    # variable between A and B is MCP tool availability — not other user config.
+    cmd = [codex_cmd, "exec", "--sandbox", "read-only", "--ephemeral", "--ignore-user-config"]
+    if not isolate_mcp:
+        # Inject errordog MCP server config inline
+        cmd += [
+            "-c", f'mcp_servers.errordog.command="uv"',
+            "-c", (
+                f'mcp_servers.errordog.args='
+                f'["run", "--directory", "{PROJECT_DIR}", "python", "-m", "errordog", "serve"]'
+            ),
+            "-c", 'mcp_servers.errordog.default_tools_approval_mode="approve"',
+        ]
     cmd += ["--color", "never", "--json", "--output-last-message", tmp_out, "-"]
 
     t0 = time.perf_counter()
