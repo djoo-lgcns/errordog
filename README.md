@@ -1,5 +1,36 @@
 # Errordog
 
+```mermaid
+flowchart TD
+      app["Python Application"]
+      exc(["Uncaught Exception"])
+
+      subgraph intercept ["① Runtime Interception"]
+          hook["sys.excepthook\nimport errordog.tracker"]
+          snap[("ESF Snapshot\nstack frames · locals · object refs")]
+          hook --> snap
+      end
+
+      subgraph expose ["② Protocol Bridge"]
+          mcp["MCP Server  (stdio)"]
+          t1["dap_get_stack_frames"]
+          t2["dap_get_variables"]
+          t3["dap_drill_into"]
+      end
+
+      agent["AI Agent  (Codex CLI)"]
+      dx["Root Cause\n(concrete variable values)"]
+
+      app -->|raises| exc
+      exc -->|"before object graph is lost"| hook
+      snap -->|structured · queryable| mcp
+      t1 & t2 & t3 <-->|tool calling loop| agent
+      agent --> dx
+
+      style intercept fill:#fff3cd,stroke:#e6a817
+      style expose fill:#d6eaf8,stroke:#2e86c1
+```
+
 Python 런타임 에러를 자동으로 캡처하고, AI 에이전트가 MCP/HTTP 도구로 분석하는 하이브리드 디버깅 서버.
 
 ```
