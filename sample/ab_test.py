@@ -359,8 +359,6 @@ def run_condition_b(
 # ── Output ────────────────────────────────────────────────────────────────────
 
 _SEP = "─" * 67
-_CHECK = "✓"
-_CROSS = "✗"
 
 
 def print_scenario(sr: ScenarioResult) -> None:
@@ -381,12 +379,14 @@ def print_scenario(sr: ScenarioResult) -> None:
             f"{n}×{b.tool_names.count(n)}" if b.tool_names.count(n) > 1 else n
             for n in unique_names
         ]
-        print(f"{'  tools used':<28} {'':>16}  {', '.join(parts)}")
+        print(f"{'  tools used':<28} {'':>16} {', '.join(parts)}")
     print(f"{'Response time (s)':<28} {a.response_time_s:>16.1f} {b.response_time_s:>18.1f}")
-    print(f"{'Specificity score':<28} {a.specificity_score:>15.0%} {b.specificity_score:>17.0%}")
-    a_id = f"{_CHECK} Yes" if a.root_cause_identified else f"{_CROSS} Partial"
-    b_id = f"{_CHECK} Yes" if b.root_cause_identified else f"{_CROSS} Partial"
-    print(f"{'Root cause identified':<28} {a_id:>16} {b_id:>18}")
+    total_kw = len(next(
+        (s["ground_truth_keywords"] for s in SCENARIOS if s["name"] == sr.scenario_name), []
+    ))
+    a_kw = f"{len(a.matched_keywords)}/{total_kw} ({a.specificity_score:.0%})"
+    b_kw = f"{len(b.matched_keywords)}/{total_kw} ({b.specificity_score:.0%})"
+    print(f"{'Keyword match':<28} {a_kw:>16} {b_kw:>18}")
     print(_SEP)
     if a.final_response:
         preview = a.final_response[:120].replace("\n", " ")
@@ -423,11 +423,7 @@ def print_summary(results: list[ScenarioResult]) -> None:
     b_tools = [r.condition_b.tool_calls for r in results if not r.condition_b.error]
     a_spec = [r.condition_a.specificity_score for r in results if not r.condition_a.error]
     b_spec = [r.condition_b.specificity_score for r in results if not r.condition_b.error]
-    # Root cause: count scenarios where specificity_score >= 0.5 (partial match ok)
-    # Weighted by avg specificity so 50% and 100% are not treated identically.
-    a_found = sum(1 for r in results if r.condition_a.root_cause_identified)
-    b_found = sum(1 for r in results if r.condition_b.root_cause_identified)
-    # Total keyword matches across all scenarios (numerator = matched, denom = total keywords)
+    # Keyword coverage: total matched / total possible across all scenarios
     _kw_by_name = {s["name"]: s["ground_truth_keywords"] for s in SCENARIOS}
     a_kw_hit = sum(len(r.condition_a.matched_keywords) for r in results if not r.condition_a.error)
     b_kw_hit = sum(len(r.condition_b.matched_keywords) for r in results if not r.condition_b.error)
@@ -439,7 +435,6 @@ def print_summary(results: list[ScenarioResult]) -> None:
         len(_kw_by_name.get(r.scenario_name, []))
         for r in results if not r.condition_b.error
     )
-    n = len(results)
 
     print(f"{'Avg input tokens':<28} {avg(a_in):>16,.0f} {avg(b_in):>18,.0f}")
     print(f"{'Avg output tokens':<28} {avg(a_out):>16,.0f} {avg(b_out):>18,.0f}")
@@ -447,9 +442,6 @@ def print_summary(results: list[ScenarioResult]) -> None:
     print(f"{'Avg MCP tool calls':<28} {'0':>16} {avg(b_tools):>18.1f}")
     print(f"{'Avg response time (s)':<28} {avg(a_time):>16.1f} {avg(b_time):>18.1f}")
     print(f"{'Avg specificity':<28} {avg(a_spec):>15.0%} {avg(b_spec):>17.0%}")
-    a_rc = f"{a_found}/{n} ({a_found/n:.0%})"
-    b_rc = f"{b_found}/{n} ({b_found/n:.0%})"
-    print(f"{'Root cause found (≥50%)':<28} {a_rc:>16} {b_rc:>18}")
     a_kw = f"{a_kw_hit}/{a_kw_tot} ({a_kw_hit/a_kw_tot:.0%})" if a_kw_tot else "n/a"
     b_kw = f"{b_kw_hit}/{b_kw_tot} ({b_kw_hit/b_kw_tot:.0%})" if b_kw_tot else "n/a"
     print(f"{'Keyword coverage':<28} {a_kw:>16} {b_kw:>18}")
