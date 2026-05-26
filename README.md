@@ -314,7 +314,7 @@ Python App
 ## Development
 
 ```bash
-git clone https://github.com/your-org/errordog
+git clone https://github.com/djoo-lgcns/errordog
 cd errordog
 uv sync
 

@@ -31,9 +31,9 @@ ab-test = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/errordog"
-Repository = "https://github.com/your-org/errordog"
-Issues = "https://github.com/your-org/errordog/issues"
+Homepage = "https://github.com/djoo-lgcns/errordog"
+Repository = "https://github.com/djoo-lgcns/errordog"
+Issues = "https://github.com/djoo-lgcns/errordog/issues"
 
 [project.scripts]
 errordog = "errordog.__main__:main"
