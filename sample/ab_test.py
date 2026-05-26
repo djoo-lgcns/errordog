@@ -101,10 +101,9 @@ SCENARIOS: list[dict] = [
 @dataclass
 class ConditionResult:
     condition: str                          # "A" or "B"
-    input_tokens: int = 0                   # sum across all turns
-    cached_tokens: int = 0                  # cached_input_tokens (cost saving)
+    net_input_tokens: int = 0              # Σ (input - cached) per turn — fresh tokens only
     output_tokens: int = 0
-    total_tokens: int = 0
+    total_tokens: int = 0                   # net_input + output
     tool_calls: int = 0                     # MCP tool calls (B only)
     tool_names: list[str] = field(default_factory=list)
     response_time_s: float = 0.0
@@ -130,19 +129,24 @@ class ScenarioResult:
 
 @dataclass
 class _Usage:
-    input_tokens: int = 0
-    cached_tokens: int = 0
-    output_tokens: int = 0
+    """
+    Accumulates token counts across all turns in one codex exec run.
+
+    Each turn's input_tokens includes the full context (system prompt + all
+    prior turns), so naively summing input_tokens double-counts earlier turns.
+    Instead we track net_input_tokens = Σ(input - cached) per turn, which
+    captures only the fresh tokens added in each turn.
+    """
+    net_input_tokens: int = 0   # Σ fresh tokens per turn (primary metric)
+    output_tokens: int = 0       # Σ output tokens across all turns
 
     @property
     def total(self) -> int:
-        return self.input_tokens + self.output_tokens
+        return self.net_input_tokens + self.output_tokens
 
-    def __iadd__(self, other: "_Usage") -> "_Usage":
-        self.input_tokens += other.input_tokens
-        self.cached_tokens += other.cached_tokens
-        self.output_tokens += other.output_tokens
-        return self
+    def add_turn(self, input_tokens: int, cached_tokens: int, output_tokens: int) -> None:
+        self.net_input_tokens += input_tokens - cached_tokens
+        self.output_tokens += output_tokens
 
 
 def run_codex(
@@ -153,29 +157,29 @@ def run_codex(
     """
     Run `codex exec` and return (response_text, elapsed_s, tool_call_count, tool_names, usage).
 
-    Token counts come from `turn.completed` events in the JSONL stream.
-    For multi-turn (Condition B), all turns are summed.
+    Isolation flags applied every run:
+      --ephemeral           no session files persisted; each run starts fresh
+      --ignore-user-config  (Condition A only) skip ~/.codex/config.toml → no MCP servers
 
-    isolate_mcp=True  → fake HOME so ~/.codex/config.toml is not loaded (Condition A)
-    isolate_mcp=False → real HOME with errordog MCP configured (Condition B)
+    Token counts come from turn.completed events (JSONL).
+    net_input_tokens = Σ(input_tokens - cached_input_tokens) per turn.
     """
     tmp_out = tempfile.mktemp(suffix=".txt")
     cmd = [
         codex_cmd,
         "--ask-for-approval", "never",
         "--sandbox", "read-only",
+        "--ephemeral",                  # no session persistence between runs
+    ]
+    if isolate_mcp:
+        cmd.append("--ignore-user-config")  # Condition A: no MCP servers
+    cmd += [
         "exec",
         "--color", "never",
         "--json",
         "--output-last-message", tmp_out,
         "-",
     ]
-
-    env = os.environ.copy()
-    fake_home: str | None = None
-    if isolate_mcp:
-        fake_home = tempfile.mkdtemp(prefix="ab_cond_a_")
-        env["HOME"] = fake_home
 
     t0 = time.perf_counter()
     try:
@@ -184,14 +188,13 @@ def run_codex(
             input=prompt,
             capture_output=True,
             text=True,
-            env=env,
             timeout=MAX_WAIT_S,
         )
     except subprocess.TimeoutExpired:
         return f"(timeout after {MAX_WAIT_S}s)", MAX_WAIT_S, 0, [], _Usage()
     elapsed = time.perf_counter() - t0
 
-    # Parse JSONL: collect tool calls and sum token usage across all turns
+    # Parse JSONL: collect tool calls and accumulate token usage
     tool_calls = 0
     tool_names: list[str] = []
     usage = _Usage()
@@ -204,27 +207,26 @@ def run_codex(
 
         etype = event.get("type")
 
-        # MCP tool call events
         if etype == "item.completed" and event.get("item", {}).get("type") == "tool_call":
             tool_calls += 1
             tool_names.append(event["item"].get("name", "unknown"))
 
-        # Token usage — emitted once per turn, sum across multi-turn
         elif etype == "turn.completed":
             u = event.get("usage", {})
-            usage += _Usage(
+            # Subtract cached tokens: they represent context repeated from prior turns,
+            # not fresh tokens processed in this turn.
+            usage.add_turn(
                 input_tokens=u.get("input_tokens", 0),
                 cached_tokens=u.get("cached_input_tokens", 0),
                 output_tokens=u.get("output_tokens", 0),
             )
 
-    # Read final response from file written by --output-last-message
+    # Read final response
     out_path = Path(tmp_out)
     if out_path.exists():
         response = out_path.read_text(encoding="utf-8").strip()
         out_path.unlink(missing_ok=True)
     else:
-        # Fallback: parse last agent_message from JSONL
         response = ""
         for raw in reversed(proc.stdout.splitlines()):
             try:
@@ -239,11 +241,6 @@ def run_codex(
                 continue
         if not response and proc.stderr:
             response = f"(stderr) {proc.stderr[:300]}"
-
-    # Clean up fake home
-    if fake_home:
-        import shutil
-        shutil.rmtree(fake_home, ignore_errors=True)
 
     return response, round(elapsed, 2), tool_calls, tool_names, usage
 
@@ -300,8 +297,7 @@ def run_condition_a(
         )
         result.final_response = response
         result.response_time_s = elapsed
-        result.input_tokens = usage.input_tokens
-        result.cached_tokens = usage.cached_tokens
+        result.net_input_tokens = usage.net_input_tokens
         result.output_tokens = usage.output_tokens
         result.total_tokens = usage.total
         result.matched_keywords, result.specificity_score, result.root_cause_identified = (
@@ -326,8 +322,7 @@ def run_condition_b(
         result.response_time_s = elapsed
         result.tool_calls = tool_calls
         result.tool_names = tool_names
-        result.input_tokens = usage.input_tokens
-        result.cached_tokens = usage.cached_tokens
+        result.net_input_tokens = usage.net_input_tokens
         result.output_tokens = usage.output_tokens
         result.total_tokens = usage.total
         result.matched_keywords, result.specificity_score, result.root_cause_identified = (
@@ -353,8 +348,7 @@ def print_scenario(sr: ScenarioResult) -> None:
     print(_SEP)
     print(f"{'Metric':<28} {'A: Stacktrace':>16} {'B: Errordog':>18}")
     print(_SEP)
-    print(f"{'Input tokens':<28} {a.input_tokens:>16,} {b.input_tokens:>18,}")
-    print(f"{'  (cached)':<28} {a.cached_tokens:>16,} {b.cached_tokens:>18,}")
+    print(f"{'Net input tokens':<28} {a.net_input_tokens:>16,} {b.net_input_tokens:>18,}")
     print(f"{'Output tokens':<28} {a.output_tokens:>16,} {b.output_tokens:>18,}")
     print(f"{'Total tokens':<28} {a.total_tokens:>16,} {b.total_tokens:>18,}")
     print(f"{'MCP tool calls':<28} {'0':>16} {b.tool_calls:>18}")
@@ -391,8 +385,8 @@ def print_summary(results: list[ScenarioResult]) -> None:
     def avg(vals: list) -> float:
         return sum(vals) / len(vals) if vals else 0.0
 
-    a_in = [r.condition_a.input_tokens for r in results if not r.condition_a.error]
-    b_in = [r.condition_b.input_tokens for r in results if not r.condition_b.error]
+    a_in = [r.condition_a.net_input_tokens for r in results if not r.condition_a.error]
+    b_in = [r.condition_b.net_input_tokens for r in results if not r.condition_b.error]
     a_out = [r.condition_a.output_tokens for r in results if not r.condition_a.error]
     b_out = [r.condition_b.output_tokens for r in results if not r.condition_b.error]
     a_tot = [r.condition_a.total_tokens for r in results if not r.condition_a.error]
@@ -406,7 +400,7 @@ def print_summary(results: list[ScenarioResult]) -> None:
     b_found = sum(1 for r in results if r.condition_b.root_cause_identified)
     n = len(results)
 
-    print(f"{'Avg input tokens':<28} {avg(a_in):>16,.0f} {avg(b_in):>18,.0f}")
+    print(f"{'Avg net input tokens':<28} {avg(a_in):>16,.0f} {avg(b_in):>18,.0f}")
     print(f"{'Avg output tokens':<28} {avg(a_out):>16,.0f} {avg(b_out):>18,.0f}")
     print(f"{'Avg total tokens':<28} {avg(a_tot):>16,.0f} {avg(b_tot):>18,.0f}")
     print(f"{'Avg MCP tool calls':<28} {'0':>16} {avg(b_tools):>18.1f}")
