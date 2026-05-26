@@ -53,9 +53,16 @@ Do NOT call any external tools. Reply in 2-3 sentences with specific variable va
 PROMPT_B = """\
 Use Errordog MCP tools to diagnose error ID: {error_id}
 
-Call inspect_error(error_id) to get the call stack and crash-point variables in one step.
-Then use dap_drill_into on the ONE nested variable (variablesReference > 0) most directly
-involved in the crash. Stop drilling as soon as you have a specific value that explains the error.
+Step 1. Call inspect_error(error_id).
+
+Step 2. Check variables at the crash site:
+  - If the bad value is already visible (variablesReference == 0), state the root cause \
+directly. Do NOT call dap_drill_into.
+  - If the crash-relevant variable has variablesReference > 0, call dap_drill_into once \
+on that variable.
+    - If the root cause is now clear, stop.
+    - If a sub-field is still suspicious and has variablesReference > 0, drill one level \
+deeper. Stop as soon as the bad value is visible.
 
 Reply in 2-3 sentences stating the exact root cause with specific variable values."""
 
