@@ -207,9 +207,9 @@ def run_codex(
 
         etype = event.get("type")
 
-        if etype == "item.completed" and event.get("item", {}).get("type") == "tool_call":
+        if etype == "item.completed" and event.get("item", {}).get("type") == "mcp_tool_call":
             tool_calls += 1
-            tool_names.append(event["item"].get("name", "unknown"))
+            tool_names.append(event["item"].get("tool", "unknown"))
 
         elif etype == "turn.completed":
             u = event.get("usage", {})
