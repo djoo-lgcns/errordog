@@ -100,9 +100,9 @@ SCENARIOS: list[dict] = [
 @dataclass
 class ConditionResult:
     condition: str                          # "A" or "B"
-    net_input_tokens: int = 0              # Σ (input - cached) per turn — fresh tokens only
+    input_tokens: int = 0                  # raw input_tokens from turn.completed (cache-independent)
     output_tokens: int = 0
-    total_tokens: int = 0                   # net_input + output
+    total_tokens: int = 0                   # input + output
     tool_calls: int = 0                     # MCP tool calls (B only)
     tool_names: list[str] = field(default_factory=list)
     response_time_s: float = 0.0
@@ -131,27 +131,28 @@ class _Usage:
     """
     Accumulates token counts across all turns in one codex exec run.
 
-    Each turn's input_tokens includes the full context (system prompt + all
-    prior turns), so naively summing input_tokens double-counts earlier turns.
-    Instead we track net_input_tokens = Σ(input - cached) per turn, which
-    captures only the fresh tokens added in each turn.
+    Uses raw input_tokens (not net of cache) so measurements are independent
+    of OpenAI's server-side Automatic Prompt Caching state. Cached tokens are
+    a billing discount on the server side, but the model still processes the
+    full context — and crucially, the cache warm/cold state varies across
+    scenario runs (scenario 1 starts cold; later scenarios benefit from prior
+    warm-up), which would skew per-scenario averages if we subtracted them.
     """
-    net_input_tokens: int = 0   # Σ fresh tokens per turn (primary metric)
-    output_tokens: int = 0       # Σ output tokens across all turns
+    input_tokens: int = 0        # raw input_tokens — cache-state independent
+    output_tokens: int = 0
     turns: list[dict] = field(default_factory=list)  # per-turn breakdown for --debug
 
     @property
     def total(self) -> int:
-        return self.net_input_tokens + self.output_tokens
+        return self.input_tokens + self.output_tokens
 
     def add_turn(self, input_tokens: int, cached_tokens: int, output_tokens: int) -> None:
-        net = input_tokens - cached_tokens
-        self.net_input_tokens += net
+        self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         self.turns.append({
             "input": input_tokens,
             "cached": cached_tokens,
-            "net": net,
+            "net": input_tokens - cached_tokens,
             "output": output_tokens,
         })
 
@@ -238,7 +239,7 @@ def run_codex(
         for i, t in enumerate(usage.turns):
             print(f"    turn {i+1}: input={t['input']:,}  cached={t['cached']:,}  "
                   f"net={t['net']:,}  output={t['output']:,}")
-        print(f"  [debug {cond_label}] total net_input={usage.net_input_tokens:,}  "
+        print(f"  [debug {cond_label}] total input={usage.input_tokens:,}  "
               f"output={usage.output_tokens:,}")
 
     # Read final response
@@ -318,7 +319,7 @@ def run_condition_a(
         )
         result.final_response = response
         result.response_time_s = elapsed
-        result.net_input_tokens = usage.net_input_tokens
+        result.input_tokens = usage.input_tokens
         result.output_tokens = usage.output_tokens
         result.total_tokens = usage.total
         result.matched_keywords, result.specificity_score, result.root_cause_identified = (
@@ -344,7 +345,7 @@ def run_condition_b(
         result.response_time_s = elapsed
         result.tool_calls = tool_calls
         result.tool_names = tool_names
-        result.net_input_tokens = usage.net_input_tokens
+        result.input_tokens = usage.input_tokens
         result.output_tokens = usage.output_tokens
         result.total_tokens = usage.total
         result.matched_keywords, result.specificity_score, result.root_cause_identified = (
@@ -370,18 +371,17 @@ def print_scenario(sr: ScenarioResult) -> None:
     print(_SEP)
     print(f"{'Metric':<28} {'A: Stacktrace':>16} {'B: Errordog':>18}")
     print(_SEP)
-    print(f"{'Net input tokens':<28} {a.net_input_tokens:>16,} {b.net_input_tokens:>18,}")
+    print(f"{'Input tokens':<28} {a.input_tokens:>16,} {b.input_tokens:>18,}")
     print(f"{'Output tokens':<28} {a.output_tokens:>16,} {b.output_tokens:>18,}")
     print(f"{'Total tokens':<28} {a.total_tokens:>16,} {b.total_tokens:>18,}")
     print(f"{'MCP tool calls':<28} {'0':>16} {b.tool_calls:>18}")
     if b.tool_names:
-        # Print each unique tool name on its own line (preserves insertion order)
         unique_names = list(dict.fromkeys(b.tool_names))
-        for i, name in enumerate(unique_names):
-            label = "  tools used" if i == 0 else ""
-            count = b.tool_names.count(name)
-            suffix = f" ×{count}" if count > 1 else ""
-            print(f"{label:<28} {'':>16} {name}{suffix}")
+        parts = [
+            f"{n}×{b.tool_names.count(n)}" if b.tool_names.count(n) > 1 else n
+            for n in unique_names
+        ]
+        print(f"{'  tools used':<28} {'':>16}  {', '.join(parts)}")
     print(f"{'Response time (s)':<28} {a.response_time_s:>16.1f} {b.response_time_s:>18.1f}")
     print(f"{'Specificity score':<28} {a.specificity_score:>15.0%} {b.specificity_score:>17.0%}")
     a_id = f"{_CHECK} Yes" if a.root_cause_identified else f"{_CROSS} Partial"
@@ -412,8 +412,8 @@ def print_summary(results: list[ScenarioResult]) -> None:
     def avg(vals: list) -> float:
         return sum(vals) / len(vals) if vals else 0.0
 
-    a_in = [r.condition_a.net_input_tokens for r in results if not r.condition_a.error]
-    b_in = [r.condition_b.net_input_tokens for r in results if not r.condition_b.error]
+    a_in = [r.condition_a.input_tokens for r in results if not r.condition_a.error]
+    b_in = [r.condition_b.input_tokens for r in results if not r.condition_b.error]
     a_out = [r.condition_a.output_tokens for r in results if not r.condition_a.error]
     b_out = [r.condition_b.output_tokens for r in results if not r.condition_b.error]
     a_tot = [r.condition_a.total_tokens for r in results if not r.condition_a.error]
@@ -423,17 +423,36 @@ def print_summary(results: list[ScenarioResult]) -> None:
     b_tools = [r.condition_b.tool_calls for r in results if not r.condition_b.error]
     a_spec = [r.condition_a.specificity_score for r in results if not r.condition_a.error]
     b_spec = [r.condition_b.specificity_score for r in results if not r.condition_b.error]
+    # Root cause: count scenarios where specificity_score >= 0.5 (partial match ok)
+    # Weighted by avg specificity so 50% and 100% are not treated identically.
     a_found = sum(1 for r in results if r.condition_a.root_cause_identified)
     b_found = sum(1 for r in results if r.condition_b.root_cause_identified)
+    # Total keyword matches across all scenarios (numerator = matched, denom = total keywords)
+    _kw_by_name = {s["name"]: s["ground_truth_keywords"] for s in SCENARIOS}
+    a_kw_hit = sum(len(r.condition_a.matched_keywords) for r in results if not r.condition_a.error)
+    b_kw_hit = sum(len(r.condition_b.matched_keywords) for r in results if not r.condition_b.error)
+    a_kw_tot = sum(
+        len(_kw_by_name.get(r.scenario_name, []))
+        for r in results if not r.condition_a.error
+    )
+    b_kw_tot = sum(
+        len(_kw_by_name.get(r.scenario_name, []))
+        for r in results if not r.condition_b.error
+    )
     n = len(results)
 
-    print(f"{'Avg net input tokens':<28} {avg(a_in):>16,.0f} {avg(b_in):>18,.0f}")
+    print(f"{'Avg input tokens':<28} {avg(a_in):>16,.0f} {avg(b_in):>18,.0f}")
     print(f"{'Avg output tokens':<28} {avg(a_out):>16,.0f} {avg(b_out):>18,.0f}")
     print(f"{'Avg total tokens':<28} {avg(a_tot):>16,.0f} {avg(b_tot):>18,.0f}")
     print(f"{'Avg MCP tool calls':<28} {'0':>16} {avg(b_tools):>18.1f}")
     print(f"{'Avg response time (s)':<28} {avg(a_time):>16.1f} {avg(b_time):>18.1f}")
     print(f"{'Avg specificity':<28} {avg(a_spec):>15.0%} {avg(b_spec):>17.0%}")
-    print(f"{'Root cause found':<28} {a_found}/{n} ({a_found/n:.0%}){b_found:>14}/{n} ({b_found/n:.0%})")
+    a_rc = f"{a_found}/{n} ({a_found/n:.0%})"
+    b_rc = f"{b_found}/{n} ({b_found/n:.0%})"
+    print(f"{'Root cause found (≥50%)':<28} {a_rc:>16} {b_rc:>18}")
+    a_kw = f"{a_kw_hit}/{a_kw_tot} ({a_kw_hit/a_kw_tot:.0%})" if a_kw_tot else "n/a"
+    b_kw = f"{b_kw_hit}/{b_kw_tot} ({b_kw_hit/b_kw_tot:.0%})" if b_kw_tot else "n/a"
+    print(f"{'Keyword coverage':<28} {a_kw:>16} {b_kw:>18}")
     print(f"{'═' * 67}\n")
 
 
