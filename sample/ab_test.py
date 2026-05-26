@@ -53,16 +53,16 @@ Do NOT call any external tools. Reply in 2-3 sentences with specific variable va
 PROMPT_B = """\
 Use Errordog MCP tools to diagnose error ID: {error_id}
 
-Step 1. Call inspect_error(error_id).
+Step 1. Call dap_get_stack_frames(error_id).
+  frame_index=0 is the crash point (innermost frame).
 
-Step 2. Check variables at the crash site:
-  - If the bad value is already visible (variablesReference == 0), state the root cause \
-directly. Do NOT call dap_drill_into.
-  - If the crash-relevant variable has variablesReference > 0, call dap_drill_into once \
-on that variable.
-    - If the root cause is now clear, stop.
-    - If a sub-field is still suspicious and has variablesReference > 0, drill one level \
-deeper. Stop as soon as the bad value is visible.
+Step 2. Call dap_get_variables(error_id, frame_index=0).
+  Each variable has a "value" field with its full Python repr — read this first.
+  - If the bad value is readable directly from "value", state the root cause. \
+Do NOT call dap_drill_into.
+  - Only call dap_drill_into if "value" is too large or truncated to identify the \
+specific bad value (e.g. a long list where the offending element is not obvious).
+    - Drill into the ONE most suspicious variable. Stop as soon as the bad value is clear.
 
 Reply in 2-3 sentences stating the exact root cause with specific variable values."""
 

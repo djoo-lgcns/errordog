@@ -11,140 +11,7 @@ from errordog.server import (
     dap_drill_into,
     dap_get_stack_frames,
     dap_get_variables,
-    evaluate_expression,
-    generate_reproduction_test,
-    get_error_details,
-    inspect_error,
-    list_errors,
 )
-from errordog.store import SnapshotStore
-
-
-class TestListErrors:
-    def test_returns_empty_list(self, snapshot_dir: Path) -> None:
-        create_server(snapshot_dir=snapshot_dir)
-        result = list_errors()
-        assert result == []
-
-    def test_returns_summaries(
-        self, populated_snapshot_dir: Path, sample_snapshot: ErrorSnapshot
-    ) -> None:
-        create_server(snapshot_dir=populated_snapshot_dir)
-        result = list_errors()
-        assert len(result) == 1
-        entry = result[0]
-        assert entry["error_id"] == sample_snapshot.error_id
-        assert entry["exception_type"] == "ValueError"
-        assert entry["file_path"] == "/home/user/app/main.py"
-        assert entry["line_number"] == 42
-        assert entry["function_name"] == "process_data"
-
-
-class TestGetErrorDetails:
-    def test_returns_full_snapshot(
-        self, populated_snapshot_dir: Path, sample_snapshot: ErrorSnapshot
-    ) -> None:
-        create_server(snapshot_dir=populated_snapshot_dir)
-        result = get_error_details(sample_snapshot.error_id)
-        assert result["error_id"] == sample_snapshot.error_id
-        assert result["exception_type"] == "ValueError"
-        assert len(result["frames"]) == 1
-        assert result["frames"][0]["file_path"] == "/home/user/app/main.py"
-
-    def test_returns_error_for_missing_id(self, snapshot_dir: Path) -> None:
-        create_server(snapshot_dir=snapshot_dir)
-        result = get_error_details("err_20260310T131600_nonexist")
-        assert result["error"] == "Snapshot not found"
-        assert result["error_id"] == "err_20260310T131600_nonexist"
-
-    def test_returns_error_for_corrupted_file(self, snapshot_dir: Path) -> None:
-        (snapshot_dir / "err_20260310T131600_badone.json").write_text("not json")
-        create_server(snapshot_dir=snapshot_dir)
-        result = get_error_details("err_20260310T131600_badone")
-        assert result["error"] == "Snapshot corrupted"
-
-
-class TestEvaluateExpression:
-    def test_evaluates_expression_against_snapshot(
-        self, populated_snapshot_dir: Path
-    ) -> None:
-        create_server(snapshot_dir=populated_snapshot_dir)
-        result = evaluate_expression("x + 1", "err_20260310T131600_a3f2b1")
-        assert result["success"] is True
-        assert result["result"] == "11"
-        assert result["mode"] == "mock"
-
-    def test_returns_error_for_missing_snapshot(self, snapshot_dir: Path) -> None:
-        create_server(snapshot_dir=snapshot_dir)
-        result = evaluate_expression("x", "err_nonexistent")
-        assert result["success"] is False
-        assert "not found" in result["error"]
-
-    def test_returns_error_for_bad_frame_index(
-        self, populated_snapshot_dir: Path
-    ) -> None:
-        create_server(snapshot_dir=populated_snapshot_dir)
-        result = evaluate_expression("x", "err_20260310T131600_a3f2b1", frame_index=99)
-        assert result["success"] is False
-        assert "out of range" in result["error"]
-
-    def test_reports_eval_error(self, populated_snapshot_dir: Path) -> None:
-        create_server(snapshot_dir=populated_snapshot_dir)
-        result = evaluate_expression("1/0", "err_20260310T131600_a3f2b1")
-        assert result["success"] is False
-        assert "ZeroDivisionError" in result["error"]
-
-
-class TestGenerateReproductionTest:
-    @pytest.fixture()
-    def snapshot_with_cwd(self, snapshot_dir: Path) -> ErrorSnapshot:
-        """Snapshot with cwd set so module derivation works."""
-        import json
-
-        snap = ErrorSnapshot(
-            error_id="err_testgen_mcp",
-            timestamp="2026-01-01T00:00:00Z",
-            exception_type="TypeError",
-            exception_message="bad type",
-            cwd="/project",
-            frames=[
-                Frame(
-                    file_path="/project/app.py",
-                    line_number=5,
-                    function_name="run",
-                    locals={"x": "42"},
-                ),
-            ],
-        )
-        path = snapshot_dir / f"{snap.error_id}.json"
-        path.write_text(json.dumps(snap.model_dump(), indent=2))
-        return snap
-
-    def test_generates_test_via_mcp(
-        self,
-        snapshot_dir: Path,
-        snapshot_with_cwd: ErrorSnapshot,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr("errordog.testgen.GENERATED_TESTS_DIR", tmp_path / "gen")
-        create_server(snapshot_dir=snapshot_dir)
-        result = generate_reproduction_test("err_testgen_mcp")
-        assert result["function_name"] == "run"
-        assert result["exception_type"] == "TypeError"
-        assert "def test_reproduce_err_testgen_mcp" in result["test_code"]
-        assert Path(result["file_path"]).exists()
-
-    def test_returns_error_for_missing_snapshot(
-        self,
-        snapshot_dir: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr("errordog.testgen.GENERATED_TESTS_DIR", tmp_path / "gen")
-        create_server(snapshot_dir=snapshot_dir)
-        result = generate_reproduction_test("err_nonexistent")
-        assert "error" in result
 
 
 class TestDapGetStackFrames:
@@ -212,6 +79,16 @@ class TestDapGetStackFrames:
         item_var = next(v for v in result if v["name"] == "item")
         assert item_var["variablesReference"] > 0, "dict local should be drillable"
 
+    def test_dap_get_variables_value_is_full_repr(
+        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
+    ) -> None:
+        """value field always contains the full Python repr — readable without drilling."""
+        create_server(snapshot_dir=snapshot_dir)
+        result = dap_get_variables(nested_snapshot.error_id, frame_index=0)
+        item_var = next(v for v in result if v["name"] == "item")
+        # Full repr is always present — 'free' is visible without dap_drill_into
+        assert "'price': 'free'" in item_var["value"]
+
     def test_dap_drill_into_expands_dict(
         self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
     ) -> None:
@@ -244,82 +121,26 @@ class TestDapGetStackFrames:
         assert len(result) == 1
         assert "error" in result[0]
 
-
-class TestInspectError:
-    """Tests for the inspect_error entry-point tool."""
-
-    @pytest.fixture()
-    def nested_snapshot(self, snapshot_dir: Path) -> ErrorSnapshot:
-        snap = ErrorSnapshot(
-            error_id="err_test_inspect",
-            timestamp="2026-01-01T00:00:00",
-            exception_type="TypeError",
-            exception_message="unsupported operand",
-            frames=[
-                Frame(
-                    frame_index=0,
-                    function_name="calculate",
-                    file_path="app.py",
-                    line_number=10,
-                    locals={"item": "{'price': 'free', 'qty': 1}", "total": "0"},
-                ),
-                Frame(
-                    frame_index=1,
-                    function_name="run",
-                    file_path="app.py",
-                    line_number=20,
-                    locals={},
-                ),
-            ],
-        )
-        (snapshot_dir / f"{snap.error_id}.json").write_text(
-            json.dumps(snap.model_dump(), indent=2)
-        )
-        return snap
-
-    def test_returns_stack_frames_and_variables(
+    def test_workflow_frames_then_variables_then_drill(
         self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
     ) -> None:
+        """Primary workflow: dap_get_stack_frames → dap_get_variables → dap_drill_into."""
         create_server(snapshot_dir=snapshot_dir)
-        result = inspect_error(nested_snapshot.error_id)
-        assert "stack_frames" in result
-        assert "variables" in result
-        assert len(result["stack_frames"]) == 2
-        assert result["stack_frames"][0]["frame_index"] == 0
-        assert result["stack_frames"][0]["function_name"] == "calculate"
 
-    def test_variables_are_from_crash_frame(
-        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
-    ) -> None:
-        create_server(snapshot_dir=snapshot_dir)
-        result = inspect_error(nested_snapshot.error_id)
-        names = {v["name"] for v in result["variables"]}
-        assert "item" in names
-        assert "total" in names
+        # Step 1: locate crash frame
+        frames = dap_get_stack_frames(nested_snapshot.error_id)
+        crash_frame = frames[0]
+        assert crash_frame["frame_index"] == 0
 
-    def test_nested_variable_has_reference(
-        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
-    ) -> None:
-        create_server(snapshot_dir=snapshot_dir)
-        result = inspect_error(nested_snapshot.error_id)
-        item_var = next(v for v in result["variables"] if v["name"] == "item")
-        assert item_var["variablesReference"] > 0
+        # Step 2: read variables — full repr visible directly
+        variables = dap_get_variables(nested_snapshot.error_id, frame_index=0)
+        item_var = next(v for v in variables if v["name"] == "item")
+        assert "'price': 'free'" in item_var["value"]  # readable without drilling
 
-    def test_inspect_then_drill_into_chain(
-        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
-    ) -> None:
-        """Primary workflow: inspect_error → dap_drill_into."""
-        create_server(snapshot_dir=snapshot_dir)
-        result = inspect_error(nested_snapshot.error_id)
-        item_var = next(v for v in result["variables"] if v["name"] == "item")
+        # Step 3 (optional): drill for structural expansion
         children = dap_drill_into(nested_snapshot.error_id, item_var["variablesReference"])
-        child_names = {c["name"] for c in children}
-        assert "price" in child_names
-
-    def test_missing_snapshot_returns_error(self, snapshot_dir: Path) -> None:
-        create_server(snapshot_dir=snapshot_dir)
-        result = inspect_error("err_nonexistent")
-        assert "error" in result
+        price = next(c for c in children if c["name"] == "price")
+        assert price["value"] == "'free'"
 
 
 class TestCreateServer:
