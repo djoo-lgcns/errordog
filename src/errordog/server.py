@@ -35,11 +35,13 @@ def _get_adapter(error_id: str) -> MockAdapter | None:
 
 @mcp.tool()
 def list_errors() -> list[dict]:
-    """Return list of stored error snapshots with summary info.
+    """List captured Python error snapshots. Call this first if no error_id is known.
 
     Each entry includes: error_id, timestamp, exception_type,
     exception_message, file_path, line_number, function_name.
     Sorted by timestamp descending (most recent first).
+
+    Once you have an error_id, call inspect_error(error_id) to investigate.
     """
     store = _get_store()
     summaries = store.list_summaries()
@@ -131,16 +133,69 @@ def generate_reproduction_test(error_id: str) -> dict:
 
 
 @mcp.tool()
+def inspect_error(error_id: str) -> dict:
+    """Primary entry point for investigating a captured Python error.
+
+    Always call this first when asked to debug, diagnose, or explain an error.
+    Returns the call stack AND local variables at the crash point in a single call.
+
+    After this call:
+    - Read stack_frames to understand where the crash occurred.
+    - Read variables to find the bad value at the crash site (frame_index=0).
+    - If a variable has variablesReference > 0, it is a nested object (dict/list/tuple).
+      Call dap_drill_into(error_id, variablesReference) on the ONE variable most
+      directly involved in the crash. Drill one level at a time; stop as soon as
+      you have a concrete value that fully explains the error.
+
+    Args:
+        error_id: The snapshot ID to investigate (from list_errors if unknown).
+
+    Returns:
+        {
+          "stack_frames": [{frame_index, function_name, file_path, line_number}, ...],
+          "variables":    [{name, value, type, variablesReference}, ...]
+        }
+        frame_index=0 is the innermost crash point.
+        variablesReference > 0 means the variable is a nested object — use dap_drill_into.
+        or {"error": "..."} if the snapshot is not found.
+    """
+    adapter = _get_adapter(error_id)
+    if adapter is None:
+        return {"error": f"Snapshot not found: {error_id}"}
+
+    stack_frames = [
+        {
+            "frame_index": frame.id,
+            "function_name": frame.name,
+            "file_path": frame.source_path,
+            "line_number": frame.line,
+        }
+        for frame in adapter.session.stack_trace
+    ]
+
+    variables = adapter.session.variables.get(0)
+    crash_variables = (
+        [
+            {
+                "name": v.name,
+                "value": v.value,
+                "type": v.type or "",
+                "variablesReference": v.variables_reference,
+            }
+            for v in variables
+        ]
+        if variables is not None
+        else []
+    )
+
+    return {"stack_frames": stack_frames, "variables": crash_variables}
+
+
+@mcp.tool()
 def dap_get_stack_frames(error_id: str) -> list[dict]:
-    """Step 1 of post-mortem investigation. Get the call stack for an error snapshot.
-
-    Recommended workflow:
-      1. dap_get_stack_frames(error_id)          ← you are here
-      2. dap_get_variables(error_id, frame_index=0)
-      3. dap_drill_into(error_id, variablesReference)  [if needed]
-
-    frame_index=0 is the crash point (innermost frame). Proceed to
-    dap_get_variables with frame_index=0 to inspect locals at the crash site.
+    """Get call stack frames for a snapshot. Use inspect_error() instead for a
+    combined stack + variables view. Call this directly only when you need frames
+    for a specific non-crash frame_index before calling dap_get_variables.
 
     Args:
         error_id: The snapshot to inspect.
@@ -165,15 +220,11 @@ def dap_get_stack_frames(error_id: str) -> list[dict]:
 
 @mcp.tool()
 def dap_get_variables(error_id: str, frame_index: int = 0) -> list[dict]:
-    """Step 2 of post-mortem investigation. Get local variables at a stack frame.
+    """Get local variables at a specific stack frame. Use inspect_error() instead
+    for frame_index=0 (crash point). Call this directly only when you need variables
+    at a non-crash frame (e.g., frame_index=1 for the caller context).
 
-    For variables where variablesReference > 0, the value is a nested object
-    (dict, list, tuple) that can be expanded with dap_drill_into().
-
-    Drilling strategy: identify the variable most directly involved in the crash
-    (e.g., the argument passed to the failing call). Drill into that one first.
-    Only go deeper if the current level does not yet reveal the specific bad value.
-    Stop as soon as you can state the root cause with concrete evidence.
+    Variables with variablesReference > 0 are nested objects expandable via dap_drill_into.
 
     Args:
         error_id: The snapshot to inspect.

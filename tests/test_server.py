@@ -14,6 +14,7 @@ from errordog.server import (
     evaluate_expression,
     generate_reproduction_test,
     get_error_details,
+    inspect_error,
     list_errors,
 )
 from errordog.store import SnapshotStore
@@ -242,6 +243,83 @@ class TestDapGetStackFrames:
         result = dap_drill_into("err_nonexistent", 1000)
         assert len(result) == 1
         assert "error" in result[0]
+
+
+class TestInspectError:
+    """Tests for the inspect_error entry-point tool."""
+
+    @pytest.fixture()
+    def nested_snapshot(self, snapshot_dir: Path) -> ErrorSnapshot:
+        snap = ErrorSnapshot(
+            error_id="err_test_inspect",
+            timestamp="2026-01-01T00:00:00",
+            exception_type="TypeError",
+            exception_message="unsupported operand",
+            frames=[
+                Frame(
+                    frame_index=0,
+                    function_name="calculate",
+                    file_path="app.py",
+                    line_number=10,
+                    locals={"item": "{'price': 'free', 'qty': 1}", "total": "0"},
+                ),
+                Frame(
+                    frame_index=1,
+                    function_name="run",
+                    file_path="app.py",
+                    line_number=20,
+                    locals={},
+                ),
+            ],
+        )
+        (snapshot_dir / f"{snap.error_id}.json").write_text(
+            json.dumps(snap.model_dump(), indent=2)
+        )
+        return snap
+
+    def test_returns_stack_frames_and_variables(
+        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
+    ) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        result = inspect_error(nested_snapshot.error_id)
+        assert "stack_frames" in result
+        assert "variables" in result
+        assert len(result["stack_frames"]) == 2
+        assert result["stack_frames"][0]["frame_index"] == 0
+        assert result["stack_frames"][0]["function_name"] == "calculate"
+
+    def test_variables_are_from_crash_frame(
+        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
+    ) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        result = inspect_error(nested_snapshot.error_id)
+        names = {v["name"] for v in result["variables"]}
+        assert "item" in names
+        assert "total" in names
+
+    def test_nested_variable_has_reference(
+        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
+    ) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        result = inspect_error(nested_snapshot.error_id)
+        item_var = next(v for v in result["variables"] if v["name"] == "item")
+        assert item_var["variablesReference"] > 0
+
+    def test_inspect_then_drill_into_chain(
+        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
+    ) -> None:
+        """Primary workflow: inspect_error → dap_drill_into."""
+        create_server(snapshot_dir=snapshot_dir)
+        result = inspect_error(nested_snapshot.error_id)
+        item_var = next(v for v in result["variables"] if v["name"] == "item")
+        children = dap_drill_into(nested_snapshot.error_id, item_var["variablesReference"])
+        child_names = {c["name"] for c in children}
+        assert "price" in child_names
+
+    def test_missing_snapshot_returns_error(self, snapshot_dir: Path) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        result = inspect_error("err_nonexistent")
+        assert "error" in result
 
 
 class TestCreateServer:
