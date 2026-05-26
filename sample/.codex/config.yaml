@@ -1,0 +1,19 @@
+# Codex CLI MCP configuration for Errordog
+# Place this file at ~/.codex/config.yaml or use project-level config.
+# Adjust the --directory path to match your local errordog installation.
+
+mcpServers:
+  errordog:
+    command: uv
+    args:
+      - run
+      - --directory
+      - /Users/djoo/Projects/debugger-v4
+      - python
+      - -m
+      - errordog
+      - serve
+    description: >
+      Python runtime error snapshot analysis server.
+      Captures uncaught exceptions with full stack frames and local variables,
+      then exposes them via MCP tools for AI-assisted debugging.

@@ -30,8 +30,9 @@ def _make_source(path: str | None) -> dict:
 class MockAdapter:
     """Responds to DAP requests using a stored ESF snapshot (no live debugpy)."""
 
-    def __init__(self, error_id: str) -> None:
+    def __init__(self, error_id: str, snapshot_dir: Path | None = None) -> None:
         self.error_id = error_id
+        self._snapshot_dir = snapshot_dir
         self.session = DebugSession(mode="mock", error_id=error_id)
         self._seq = 1
         self._loaded = False
@@ -39,6 +40,7 @@ class MockAdapter:
         self._drilldown: dict[int, list[dict]] = {}  # ref → child variable dicts
         self._next_ref = _DRILLDOWN_REF_BASE
         self._coredumpy_frames: list[Any] | None = None  # loaded coredumpy frames
+        self._cwd: Path | None = None  # snapshot working directory for path resolution
 
     # ── message builders ──────────────────────────────────────────────────
 
@@ -107,7 +109,7 @@ class MockAdapter:
 
     def _load(self) -> bool:
         """Load ESF snapshot into session state. Returns True on success."""
-        store = SnapshotStore()
+        store = SnapshotStore(snapshot_dir=self._snapshot_dir)
         try:
             snapshot = store.get_snapshot(self.error_id)
         except (FileNotFoundError, ValueError) as exc:
@@ -118,6 +120,8 @@ class MockAdapter:
             "exception_type": snapshot.exception_type,
             "exception_message": snapshot.exception_message,
         }
+        # Store cwd for resolving relative paths
+        self._cwd = Path(snapshot.cwd) if snapshot.cwd else Path.cwd()
         self.session.thread_id = 1
         self.session.frame_id = 0
 
@@ -337,6 +341,38 @@ class MockAdapter:
                             "type": "",
                             "variablesReference": 0,
                         }))
+
+        elif command == "source":
+            args = msg.get("arguments", {})
+            source_arg = args.get("source", {})
+            file_path_str = source_arg.get("path", "")
+
+            if not file_path_str:
+                await write_message(writer, self._response(msg, {
+                    "error": {"id": 3, "format": "No source path provided"},
+                }, success=False))
+            else:
+                file_path = Path(file_path_str)
+                # Resolve relative paths using snapshot's cwd
+                if not file_path.is_absolute() and self._cwd:
+                    file_path = self._cwd / file_path
+
+                if file_path.exists():
+                    try:
+                        content = file_path.read_text(encoding="utf-8")
+                        await write_message(writer, self._response(msg, {
+                            "content": content,
+                            "mimeType": "text/x-python",
+                        }))
+                    except Exception as e:
+                        logger.error("MockAdapter: failed to read source %s: %s", file_path, e)
+                        await write_message(writer, self._response(msg, {
+                            "error": {"id": 3, "format": f"Cannot read source: {e}"},
+                        }, success=False))
+                else:
+                    await write_message(writer, self._response(msg, {
+                        "error": {"id": 3, "format": f"Source file not found: {file_path}"},
+                    }, success=False))
 
         elif command == "disconnect":
             await write_message(writer, self._response(msg))

@@ -3,7 +3,9 @@
 from pathlib import Path
 
 from fastmcp import FastMCP
+from starlette.responses import JSONResponse
 
+from errordog.dap.mock import MockAdapter
 from errordog.evaluator import eval_expression, eval_expression_coredumpy
 from errordog.store import SnapshotStore
 from errordog.testgen import generate_reproduction_test as _generate_test
@@ -11,6 +13,7 @@ from errordog.testgen import generate_reproduction_test as _generate_test
 mcp = FastMCP("errordog")
 
 _store: SnapshotStore | None = None
+_adapters: dict[str, MockAdapter] = {}
 
 
 def _get_store() -> SnapshotStore:
@@ -18,6 +21,17 @@ def _get_store() -> SnapshotStore:
     if _store is None:
         _store = SnapshotStore()
     return _store
+
+
+def _get_adapter(error_id: str) -> MockAdapter | None:
+    """Return a cached MockAdapter for post-mortem DAP inspection."""
+    if error_id not in _adapters:
+        store = _get_store()
+        adapter = MockAdapter(error_id, snapshot_dir=store.snapshot_dir)
+        if not adapter._load():
+            return None
+        _adapters[error_id] = adapter
+    return _adapters[error_id]
 
 
 @mcp.tool()
@@ -117,8 +131,169 @@ def generate_reproduction_test(error_id: str) -> dict:
     return _generate_test(error_id, store=store)
 
 
+@mcp.tool()
+def dap_get_stack_frames(error_id: str) -> list[dict]:
+    """Get stack frames for post-mortem DAP inspection of a snapshot.
+
+    Returns frames with frame_index values for use in dap_get_variables.
+    frame_index=0 is the crash point (innermost frame).
+
+    Args:
+        error_id: The snapshot to inspect.
+
+    Returns:
+        List of {frame_index, function_name, file_path, line_number},
+        or [{"error": "..."}] if snapshot not found.
+    """
+    adapter = _get_adapter(error_id)
+    if adapter is None:
+        return [{"error": f"Snapshot not found: {error_id}"}]
+    return [
+        {
+            "frame_index": frame.id,
+            "function_name": frame.name,
+            "file_path": frame.source_path,
+            "line_number": frame.line,
+        }
+        for frame in adapter.session.stack_trace
+    ]
+
+
+@mcp.tool()
+def dap_get_variables(error_id: str, frame_index: int = 0) -> list[dict]:
+    """Get variables for a specific stack frame in post-mortem mode.
+
+    If a variable's variablesReference > 0, it is a nested object (dict, list, tuple).
+    Call dap_drill_into() with that reference to expand it.
+
+    Args:
+        error_id: The snapshot to inspect.
+        frame_index: Stack frame index (0 = crash point, from dap_get_stack_frames).
+
+    Returns:
+        List of {name, value, type, variablesReference},
+        or [{"error": "..."}] if snapshot or frame not found.
+    """
+    adapter = _get_adapter(error_id)
+    if adapter is None:
+        return [{"error": f"Snapshot not found: {error_id}"}]
+    variables = adapter.session.variables.get(frame_index)
+    if variables is None:
+        return [{"error": f"Frame index {frame_index} not found"}]
+    return [
+        {
+            "name": v.name,
+            "value": v.value,
+            "type": v.type or "",
+            "variablesReference": v.variables_reference,
+        }
+        for v in variables
+    ]
+
+
+@mcp.tool()
+def dap_drill_into(error_id: str, variables_reference: int) -> list[dict]:
+    """Drill into a nested object using its variablesReference.
+
+    Obtain the variablesReference from dap_get_variables() or a previous
+    dap_drill_into() call. Returns [] if the reference is not expandable.
+
+    Args:
+        error_id: The snapshot to inspect.
+        variables_reference: The reference integer from a previous dap_get_variables
+            or dap_drill_into call. Must be > 0.
+
+    Returns:
+        List of {name, value, type, variablesReference} for the nested object's fields,
+        or [] if reference is unknown or not expandable.
+    """
+    adapter = _get_adapter(error_id)
+    if adapter is None:
+        return [{"error": f"Snapshot not found: {error_id}"}]
+    return adapter._drilldown.get(variables_reference, [])
+
+
+# ── HTTP transport endpoints ──────────────────────────────────────────────────
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request):  # type: ignore[no-untyped-def]
+    return JSONResponse({"status": "ok", "name": "errordog"})
+
+
+@mcp.custom_route("/openapi.json", methods=["GET"])
+async def openapi_spec(request):  # type: ignore[no-untyped-def]
+    """Auto-generate OpenAPI 3.0 spec from registered MCP tools."""
+    tools = await mcp.list_tools()
+    paths: dict = {}
+    for tool in tools:
+        mcp_tool = tool.to_mcp_tool()
+        paths[f"/tools/{tool.name}"] = {
+            "post": {
+                "operationId": tool.name,
+                "summary": (tool.description or tool.name).split("\n")[0],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": mcp_tool.inputSchema}},
+                },
+                "responses": {"200": {"description": "Success", "content": {"application/json": {"schema": {}}}}},
+            }
+        }
+    return JSONResponse({
+        "openapi": "3.0.0",
+        "info": {"title": "Errordog API", "version": "1.0.0", "description": "Python runtime error snapshot analysis API"},
+        "paths": paths,
+    })
+
+
+@mcp.custom_route("/tools/list_errors", methods=["POST"])
+async def http_list_errors(request):  # type: ignore[no-untyped-def]
+    return JSONResponse(list_errors())
+
+
+@mcp.custom_route("/tools/get_error_details", methods=["POST"])
+async def http_get_error_details(request):  # type: ignore[no-untyped-def]
+    body = await request.json()
+    return JSONResponse(get_error_details(body.get("error_id", "")))
+
+
+@mcp.custom_route("/tools/evaluate_expression", methods=["POST"])
+async def http_evaluate_expression(request):  # type: ignore[no-untyped-def]
+    body = await request.json()
+    return JSONResponse(evaluate_expression(
+        body.get("expression", ""),
+        body.get("error_id", ""),
+        body.get("frame_index", 0),
+    ))
+
+
+@mcp.custom_route("/tools/generate_reproduction_test", methods=["POST"])
+async def http_generate_reproduction_test(request):  # type: ignore[no-untyped-def]
+    body = await request.json()
+    return JSONResponse(generate_reproduction_test(body.get("error_id", "")))
+
+
+@mcp.custom_route("/tools/dap_get_stack_frames", methods=["POST"])
+async def http_dap_get_stack_frames(request):  # type: ignore[no-untyped-def]
+    body = await request.json()
+    return JSONResponse(dap_get_stack_frames(body.get("error_id", "")))
+
+
+@mcp.custom_route("/tools/dap_get_variables", methods=["POST"])
+async def http_dap_get_variables(request):  # type: ignore[no-untyped-def]
+    body = await request.json()
+    return JSONResponse(dap_get_variables(body.get("error_id", ""), body.get("frame_index", 0)))
+
+
+@mcp.custom_route("/tools/dap_drill_into", methods=["POST"])
+async def http_dap_drill_into(request):  # type: ignore[no-untyped-def]
+    body = await request.json()
+    return JSONResponse(dap_drill_into(body.get("error_id", ""), body.get("variables_reference", 0)))
+
+
 def create_server(snapshot_dir: Path | None = None) -> FastMCP:
     """Create and configure the FastMCP server instance with tools registered."""
-    global _store
+    global _store, _adapters
     _store = SnapshotStore(snapshot_dir=snapshot_dir)
+    _adapters.clear()
     return mcp

@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import os
+from pathlib import Path
 
 from errordog.dap.mock import MockAdapter
 from errordog.dap.protocol import read_message, write_message
@@ -59,7 +61,14 @@ class DapServer:
                 elif command == "attach":
                     args = msg.get("arguments", {})
                     logger.info("DAP: attach arguments: %s", args)
-                    error_id = args.get("error_id") or None
+                    # Check for error_id from argument, environment, or config file
+                    error_id = args.get("error_id") or os.environ.get("ERRORDOG_ERROR_ID")
+                    if not error_id:
+                        # Try reading from ~/.errordog/selected_error_id
+                        config_file = Path.home() / ".errordog" / "selected_error_id"
+                        if config_file.exists():
+                            error_id = config_file.read_text().strip()
+
                     if error_id:
                         logger.info("DAP: mock mode — error_id=%s", error_id)
                         await self._run_mock(buffered, reader, writer, error_id)

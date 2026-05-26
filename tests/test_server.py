@@ -1,5 +1,6 @@
 """Tests for MCP server and tools."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,9 @@ import pytest
 from errordog.models import ErrorSnapshot, Frame
 from errordog.server import (
     create_server,
+    dap_drill_into,
+    dap_get_stack_frames,
+    dap_get_variables,
     evaluate_expression,
     generate_reproduction_test,
     get_error_details,
@@ -140,6 +144,104 @@ class TestGenerateReproductionTest:
         create_server(snapshot_dir=snapshot_dir)
         result = generate_reproduction_test("err_nonexistent")
         assert "error" in result
+
+
+class TestDapGetStackFrames:
+    @pytest.fixture()
+    def nested_snapshot(self, snapshot_dir: Path) -> ErrorSnapshot:
+        snap = ErrorSnapshot(
+            error_id="err_dap_nested_001",
+            timestamp="2026-03-10T13:16:00Z",
+            exception_type="TypeError",
+            exception_message="unsupported operand",
+            cwd="/app",
+            frames=[
+                Frame(
+                    file_path="/app/orders.py",
+                    line_number=10,
+                    function_name="calculate",
+                    locals={
+                        "item": "{'price': 'free', 'qty': 1}",
+                        "total": "0",
+                    },
+                ),
+                Frame(
+                    file_path="/app/main.py",
+                    line_number=20,
+                    function_name="run",
+                    locals={"orders": "[{'price': 1500}, {'price': 'free'}]"},
+                ),
+            ],
+        )
+        (snapshot_dir / f"{snap.error_id}.json").write_text(
+            json.dumps(snap.model_dump(), indent=2)
+        )
+        return snap
+
+    def test_returns_frames(self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        result = dap_get_stack_frames(nested_snapshot.error_id)
+        assert len(result) == 2
+        assert result[0]["frame_index"] == 0
+        assert result[0]["function_name"] == "calculate"
+        assert result[0]["line_number"] == 10
+        assert result[1]["frame_index"] == 1
+        assert result[1]["function_name"] == "run"
+
+    def test_returns_error_for_missing_snapshot(self, snapshot_dir: Path) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        result = dap_get_stack_frames("err_nonexistent")
+        assert len(result) == 1
+        assert "error" in result[0]
+
+    def test_dap_get_variables_returns_locals(
+        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
+    ) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        result = dap_get_variables(nested_snapshot.error_id, frame_index=0)
+        names = {v["name"] for v in result}
+        assert "item" in names
+        assert "total" in names
+
+    def test_dap_get_variables_nested_has_reference(
+        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
+    ) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        result = dap_get_variables(nested_snapshot.error_id, frame_index=0)
+        item_var = next(v for v in result if v["name"] == "item")
+        assert item_var["variablesReference"] > 0, "dict local should be drillable"
+
+    def test_dap_drill_into_expands_dict(
+        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
+    ) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        variables = dap_get_variables(nested_snapshot.error_id, frame_index=0)
+        item_var = next(v for v in variables if v["name"] == "item")
+        children = dap_drill_into(nested_snapshot.error_id, item_var["variablesReference"])
+        child_names = {c["name"] for c in children}
+        assert "price" in child_names
+        assert "qty" in child_names
+
+    def test_dap_drill_into_unknown_ref_returns_empty(
+        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
+    ) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        result = dap_drill_into(nested_snapshot.error_id, 99999)
+        assert result == []
+
+    def test_dap_get_variables_frame_not_found(
+        self, snapshot_dir: Path, nested_snapshot: ErrorSnapshot
+    ) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        result = dap_get_variables(nested_snapshot.error_id, frame_index=99)
+        assert len(result) == 1
+        assert "error" in result[0]
+
+    def test_dap_drill_into_missing_snapshot(self, snapshot_dir: Path) -> None:
+        create_server(snapshot_dir=snapshot_dir)
+        result = dap_drill_into("err_nonexistent", 1000)
+        assert len(result) == 1
+        assert "error" in result[0]
 
 
 class TestCreateServer:
