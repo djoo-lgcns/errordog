@@ -56,7 +56,8 @@ Use Errordog MCP tools to diagnose error ID: {error_id}
 Follow this sequence:
 1. dap_get_stack_frames — inspect the call stack
 2. dap_get_variables(frame_index=0) — get locals at the crash point
-3. dap_drill_into — expand any nested object whose variablesReference > 0
+3. dap_drill_into — expand only the ONE nested object most directly related to the crash \
+(the variable whose variablesReference > 0 that is closest to the error site)
 
 Reply in 2-3 sentences stating the exact root cause with specific variable values."""
 
