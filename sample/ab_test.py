@@ -353,8 +353,13 @@ def print_scenario(sr: ScenarioResult) -> None:
     print(f"{'Total tokens':<28} {a.total_tokens:>16,} {b.total_tokens:>18,}")
     print(f"{'MCP tool calls':<28} {'0':>16} {b.tool_calls:>18}")
     if b.tool_names:
-        names = ", ".join(b.tool_names)
-        print(f"{'  tools used':<28} {'':>16} {names[:18]:>18}")
+        # Print each unique tool name on its own line (preserves insertion order)
+        unique_names = list(dict.fromkeys(b.tool_names))
+        for i, name in enumerate(unique_names):
+            label = "  tools used" if i == 0 else ""
+            count = b.tool_names.count(name)
+            suffix = f" ×{count}" if count > 1 else ""
+            print(f"{label:<28} {'':>16} {name}{suffix}")
     print(f"{'Response time (s)':<28} {a.response_time_s:>16.1f} {b.response_time_s:>18.1f}")
     print(f"{'Specificity score':<28} {a.specificity_score:>15.0%} {b.specificity_score:>17.0%}")
     a_id = f"{_CHECK} Yes" if a.root_cause_identified else f"{_CROSS} Partial"
