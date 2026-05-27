@@ -65,7 +65,8 @@ state the root cause. Do NOT call dap_drill_into.
 specific bad value (e.g. a long list where the offending element is not obvious).
     - Drill into the ONE most suspicious variable. Stop as soon as the bad value is clear.
 
-Reply in 2-3 sentences stating the exact root cause with specific variable values."""
+Reply in 2-3 sentences. Name the exact bad value literally (e.g. 'free', 'Daegu', None, 1.5) \
+— not just its type. Include the variable name, function name, and line number."""
 
 # ── Scenarios ─────────────────────────────────────────────────────────────────
 
@@ -109,6 +110,7 @@ SCENARIOS: list[dict] = [
 class ConditionResult:
     condition: str                          # "A" or "B"
     input_tokens: int = 0                  # raw input_tokens from turn.completed (cache-independent)
+    net_input_tokens: int = 0             # input_tokens - cached_input_tokens (actual processing cost)
     output_tokens: int = 0
     total_tokens: int = 0                   # input + output
     tool_calls: int = 0                     # MCP tool calls (B only)
@@ -153,6 +155,11 @@ class _Usage:
     @property
     def total(self) -> int:
         return self.input_tokens + self.output_tokens
+
+    @property
+    def net_input_tokens(self) -> int:
+        """input_tokens minus cached_input_tokens — actual processing cost."""
+        return sum(t["net"] for t in self.turns)
 
     def add_turn(self, input_tokens: int, cached_tokens: int, output_tokens: int) -> None:
         self.input_tokens += input_tokens
@@ -328,6 +335,7 @@ def run_condition_a(
         result.final_response = response
         result.response_time_s = elapsed
         result.input_tokens = usage.input_tokens
+        result.net_input_tokens = usage.net_input_tokens
         result.output_tokens = usage.output_tokens
         result.total_tokens = usage.total
         result.matched_keywords, result.specificity_score, result.root_cause_identified = (
@@ -354,6 +362,7 @@ def run_condition_b(
         result.tool_calls = tool_calls
         result.tool_names = tool_names
         result.input_tokens = usage.input_tokens
+        result.net_input_tokens = usage.net_input_tokens
         result.output_tokens = usage.output_tokens
         result.total_tokens = usage.total
         result.matched_keywords, result.specificity_score, result.root_cause_identified = (
@@ -377,7 +386,8 @@ def print_scenario(sr: ScenarioResult) -> None:
     print(_SEP)
     print(f"{'Metric':<28} {'A: Stacktrace':>16} {'B: Errordog':>18}")
     print(_SEP)
-    print(f"{'Input tokens':<28} {a.input_tokens:>16,} {b.input_tokens:>18,}")
+    print(f"{'Input tokens (raw)':<28} {a.input_tokens:>16,} {b.input_tokens:>18,}")
+    print(f"{'  net (uncached)':<28} {a.net_input_tokens:>16,} {b.net_input_tokens:>18,}")
     print(f"{'Output tokens':<28} {a.output_tokens:>16,} {b.output_tokens:>18,}")
     print(f"{'Total tokens':<28} {a.total_tokens:>16,} {b.total_tokens:>18,}")
     print(f"{'MCP tool calls':<28} {'0':>16} {b.tool_calls:>18}")
@@ -422,6 +432,8 @@ def print_summary(results: list[ScenarioResult]) -> None:
 
     a_in = [r.condition_a.input_tokens for r in results if not r.condition_a.error]
     b_in = [r.condition_b.input_tokens for r in results if not r.condition_b.error]
+    a_net = [r.condition_a.net_input_tokens for r in results if not r.condition_a.error]
+    b_net = [r.condition_b.net_input_tokens for r in results if not r.condition_b.error]
     a_out = [r.condition_a.output_tokens for r in results if not r.condition_a.error]
     b_out = [r.condition_b.output_tokens for r in results if not r.condition_b.error]
     a_tot = [r.condition_a.total_tokens for r in results if not r.condition_a.error]
@@ -444,7 +456,8 @@ def print_summary(results: list[ScenarioResult]) -> None:
         for r in results if not r.condition_b.error
     )
 
-    print(f"{'Avg input tokens':<28} {avg(a_in):>16,.0f} {avg(b_in):>18,.0f}")
+    print(f"{'Avg input tokens (raw)':<28} {avg(a_in):>16,.0f} {avg(b_in):>18,.0f}")
+    print(f"{'  avg net (uncached)':<28} {avg(a_net):>16,.0f} {avg(b_net):>18,.0f}")
     print(f"{'Avg output tokens':<28} {avg(a_out):>16,.0f} {avg(b_out):>18,.0f}")
     print(f"{'Avg total tokens':<28} {avg(a_tot):>16,.0f} {avg(b_tot):>18,.0f}")
     print(f"{'Avg MCP tool calls':<28} {'0':>16} {avg(b_tools):>18.1f}")
