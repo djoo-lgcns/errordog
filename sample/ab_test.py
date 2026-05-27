@@ -54,12 +54,13 @@ PROMPT_B = """\
 Use Errordog MCP tools to diagnose error ID: {error_id}
 
 Step 1. Call dap_get_stack_frames(error_id).
+  Read exception_type and exception_message to understand what went wrong.
   frame_index=0 is the crash point (innermost frame).
 
 Step 2. Call dap_get_variables(error_id, frame_index=0).
   Each variable has a "value" field with its full Python repr — read this first.
-  - If the bad value is readable directly from "value", state the root cause. \
-Do NOT call dap_drill_into.
+  - If the bad value is readable directly from "value" or exception_message, \
+state the root cause. Do NOT call dap_drill_into.
   - Only call dap_drill_into if "value" is too large or truncated to identify the \
 specific bad value (e.g. a long list where the offending element is not obvious).
     - Drill into the ONE most suspicious variable. Stop as soon as the bad value is clear.

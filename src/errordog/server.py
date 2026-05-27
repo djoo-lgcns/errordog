@@ -47,31 +47,50 @@ def list_errors() -> list[dict]:
 
 
 @mcp.tool()
-def dap_get_stack_frames(error_id: str) -> list[dict]:
-    """Get call stack for a captured Python error. Call this first.
+def dap_get_stack_frames(error_id: str) -> dict:
+    """Get exception info and call stack for a captured Python error. Call this first.
 
-    Returns frames ordered innermost-first: frame_index=0 is the crash point.
+    Returns the exception that was raised and the full call stack.
+    Frames are ordered innermost-first: frame_index=0 is the crash point.
     Use frame_index values in dap_get_variables to read locals at each frame.
 
     Args:
         error_id: The snapshot to inspect.
 
     Returns:
-        List of {frame_index, function_name, file_path, line_number},
-        or [{"error": "..."}] if snapshot not found.
+        {
+          "exception_type":    str,   e.g. "TypeError"
+          "exception_message": str,   e.g. "unsupported operand type(s) for *: 'int' and 'str'"
+          "stack_frames": [{frame_index, function_name, file_path, line_number}, ...]
+        }
+        or {"error": "..."} if snapshot not found.
     """
     adapter = _get_adapter(error_id)
     if adapter is None:
-        return [{"error": f"Snapshot not found: {error_id}"}]
-    return [
-        {
-            "frame_index": frame.id,
-            "function_name": frame.name,
-            "file_path": frame.source_path,
-            "line_number": frame.line,
-        }
-        for frame in adapter.session.stack_trace
-    ]
+        return {"error": f"Snapshot not found: {error_id}"}
+
+    store = _get_store()
+    try:
+        snapshot = store.get_snapshot(error_id)
+        exception_type = snapshot.exception_type
+        exception_message = snapshot.exception_message
+    except Exception:
+        exception_type = ""
+        exception_message = ""
+
+    return {
+        "exception_type": exception_type,
+        "exception_message": exception_message,
+        "stack_frames": [
+            {
+                "frame_index": frame.id,
+                "function_name": frame.name,
+                "file_path": frame.source_path,
+                "line_number": frame.line,
+            }
+            for frame in adapter.session.stack_trace
+        ],
+    }
 
 
 @mcp.tool()
